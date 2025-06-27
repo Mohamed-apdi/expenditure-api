@@ -1,0 +1,35 @@
+from pydantic import BaseModel
+
+class ExpenditureInput(BaseModel):
+    exp_food: float
+    exp_nfnd: float
+    exp_rent: float
+    pce: float
+    pcer: float
+    poor: float
+    cr15_04quantity: float
+    cr15_05quantity: float
+    cr15_06: float
+    cr15_10: float
+    hhsize: float
+    region_n: float
+    hh_water_type: float
+    hh_electricity: float
+    foodsec7_07: float
+    remt9_11: float
+    liv4_21: float
+    liv4_22: float
+    liv4_24: float
+    liv4_25: float
+    liv4_04: float
+    liv4_12: float
+    liv4_13: float
+    nfe16_33: float
+    nfe16_13: float
+    shock10_03: float
+    shock10_04: float
+    shock10_07_21: float
+    shock10_07_23: float
+    log_exp_food: float
+    log_exp_nfnd: float
+    log_exp_rent: float
