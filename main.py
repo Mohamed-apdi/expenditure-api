@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter, BackgroundTasks
 from collections import defaultdict
 from fastapi.middleware.cors import CORSMiddleware
 from auth.verify_token import verify_token
@@ -12,12 +13,25 @@ import os
 from typing import Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel
-
+import re
 
 # Load environment variables
 load_dotenv()
 
 app = FastAPI()
+# Add this with your other Pydantic models
+
+
+class UserSignup(BaseModel):
+    email: str
+    password: str
+    full_name: str
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
 
 # CORS Configuration (Essential for React Native)
 app.add_middleware(
@@ -30,19 +44,97 @@ app.add_middleware(
 
 # Load model safely
 try:
-    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "model_household_expenditure.pkl")
+    MODEL_PATH = os.path.join(os.path.dirname(
+        __file__), "model", "model_household_expenditure.pkl")
     model = joblib.load(MODEL_PATH)
 except Exception as e:
     raise RuntimeError(f"Failed to load model: {str(e)}")
+
 
 @app.get("/")
 async def health_check():
     return {"status": "healthy", "message": "Household Expenditure Predictor API"}
 
+
+# Add this new endpoint for user signup
+@app.post("/auth/signup")
+async def signup_user(user_data: UserSignup):
+    try:
+        auth_response = supabase.auth.sign_up({
+            'email': user_data.email,
+            'password': user_data.password,
+            'options': {
+                'data': {
+                    'full_name': user_data.full_name
+                }
+            }
+        })
+
+        return {
+            "message": "User created successfully",
+            "user_id": auth_response.user.id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Signup failed: {str(e)}")
+
+
+# Modify your existing get_profile endpoint to handle missing profiles more gracefully
+def is_phone_number(input_str: str) -> bool:
+    """Check if input is a phone number"""
+    # Simple international phone number regex
+    pattern = r'^\+?[0-9\s\-\(\)]{7,}$'
+    return re.match(pattern, input_str) is not None
+
+
+@app.post("/auth/login")
+async def login_user(login_data: UserLogin):
+    try:
+        # Determine if login is using phone or email
+        if is_phone_number(login_data.email):
+            # Step 1: Find user by phone
+            user_profile = supabase.table("profiles") \
+                .select("id") \
+                .eq("phone", login_data.email) \
+                .maybe_single() \
+                .execute()
+
+            if not user_profile.data:
+                raise HTTPException(status_code=404, detail="Phone not found")
+
+            # Step 2: Get email from auth.users
+            auth_user = supabase.auth.admin.get_user_by_id(
+                user_profile.data['id'])
+            email = auth_user.user.email
+
+            # Step 3: Login with email
+            auth_response = supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": login_data.password
+            })
+        else:
+            # Regular email login
+            auth_response = supabase.auth.sign_in_with_password({
+                "email": login_data.email,
+                "password": login_data.password
+            })
+
+        return {
+            "access_token": auth_response.session.access_token,
+            "refresh_token": auth_response.session.refresh_token,
+            "user_id": auth_response.user.id
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Login failed: {str(e)}"
+        )
+
+
 @app.post("/predict")
 async def predict(
     request: Request,
-    data: ExpenditureInput, 
+    data: ExpenditureInput,
     user_id: str = Depends(verify_token)
 ):
     try:
@@ -54,11 +146,11 @@ async def predict(
 
         # Use token-aware client
         supabase_user = get_supabase_with_token(token)
-        
+
         print("Incoming data:", data.dict())
         # Convert input to DataFrame
         input_df = pd.DataFrame([data.dict()])
-        
+
         # Make prediction
         log_pred = model.predict(input_df)[0]
         prediction = np.expm1(log_pred)
@@ -89,6 +181,7 @@ async def predict(
             detail=f"Prediction failed: {str(e)}"
         )
 
+
 @app.get("/predictions")
 async def get_user_predictions(
     user_id: str = Depends(verify_token),
@@ -101,13 +194,14 @@ async def get_user_predictions(
             .order("created_at", desc=True)\
             .limit(limit)\
             .execute()
-            
+
         return response.data
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch predictions: {str(e)}"
         )
+
 
 @app.get("/profile")
 async def get_profile(request: Request,user_id: str = Depends(verify_token)):
@@ -125,13 +219,13 @@ async def get_profile(request: Request,user_id: str = Depends(verify_token)):
             .eq("id", user_id)\
             .single()\
             .execute()
-            
+
         if not response.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Profile not found"
             )
-            
+
         return response.data
     except Exception as e:
         raise HTTPException(
@@ -182,9 +276,10 @@ async def get_profile_by_id(
             detail=f"Failed to fetch profile: {str(e)}"
         )
 
+
 @app.put("/profile")
 async def update_profile(
-    profile_data: dict, 
+    profile_data: dict,
     user_id: str = Depends(verify_token)
 ):
     try:
@@ -192,15 +287,15 @@ async def update_profile(
             .update(profile_data)\
             .eq("id", user_id)\
             .execute()
-            
+
         if response.error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Failed to update profile"
             )
-            
+
         return {
-            "message": "Profile updated", 
+            "message": "Profile updated",
             "data": response.data
         }
     except Exception as e:
@@ -208,11 +303,12 @@ async def update_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Profile update failed: {str(e)}"
         )
-        
+
+
 @app.get("/analytics/prediction-trend")
 async def prediction_trend(request: Request, user_id: str = Depends(verify_token), limit: int = 100):
     try:
-         # 🔐 Get Bearer token from header
+        # 🔐 Get Bearer token from header
         auth_header = request.headers.get("authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing token")
@@ -229,7 +325,7 @@ async def prediction_trend(request: Request, user_id: str = Depends(verify_token
             .order("created_at", desc=True)\
             .limit(limit)\
             .execute()
-            
+
         print("📊 Supabase raw response:", response)
 
         if not response.data:
@@ -250,7 +346,6 @@ async def prediction_trend(request: Request, user_id: str = Depends(verify_token
             status_code=500,
             detail=f"Failed to fetch prediction trend: {str(e)}"
         )
-
 
 
 @app.get("/analytics/monthly-average")
@@ -302,11 +397,11 @@ async def monthly_average(
             status_code=500,
             detail=f"Failed to fetch monthly averages: {str(e)}"
         )
-        
-        
+
+
 @app.get("/analytics/total-count")
 async def total_prediction_count(
-    request: Request, 
+    request: Request,
     user_id: str = Depends(verify_token)
 ):
     try:
@@ -326,9 +421,10 @@ async def total_prediction_count(
             .execute()
 
         if response.error:
-            raise HTTPException(status_code=500, detail="Failed to count predictions")
+            raise HTTPException(
+                status_code=500, detail="Failed to count predictions")
 
-        return { "total_predictions": response.count }
+        return {"total_predictions": response.count}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
@@ -336,7 +432,7 @@ async def total_prediction_count(
 
 @app.get("/analytics/expense-breakdown")
 async def expense_breakdown(
-    request: Request, 
+    request: Request,
     user_id: str = Depends(verify_token)
 ):
     try:
@@ -380,12 +476,10 @@ async def expense_breakdown(
 
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to compute breakdown: {str(e)}"
         )
 
-
-from datetime import datetime, timedelta
 
 @app.get("/analytics/recent")
 async def recent_predictions(
@@ -414,7 +508,8 @@ async def recent_predictions(
             .execute()
 
         if response.error:
-            raise HTTPException(status_code=500, detail="Failed to fetch recent predictions")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch recent predictions")
 
         return [
             {
@@ -429,7 +524,6 @@ async def recent_predictions(
             status_code=500,
             detail=f"Error fetching recent predictions: {str(e)}"
         )
-
 
 
 @app.get("/analytics/peak-day")
@@ -470,10 +564,12 @@ async def get_peak_prediction_day(
             status_code=500,
             detail=f"Failed to get peak day: {str(e)}"
         )
+
+
 class ScenarioCreate(BaseModel):
     prediction_id: str
     name: Optional[str] = None
-    
+
 
 @app.get("/scenarios")
 async def get_scenarios(request: Request, user_id: str = Depends(verify_token)):
@@ -484,36 +580,40 @@ async def get_scenarios(request: Request, user_id: str = Depends(verify_token)):
             raise HTTPException(status_code=401, detail="Missing token")
         token = auth_header.split(" ")[1]
         supabase_user = get_supabase_with_token(token)
-        
+
         # Get all scenarios for user with their prediction data
-        response = supabase_user.rpc("get_user_scenarios", {"user_id_param": user_id}).execute()
-        
+        response = supabase_user.rpc("get_user_scenarios", {
+                                     "user_id_param": user_id}).execute()
+
         if response.error:
-            raise HTTPException(status_code=500, detail="Failed to fetch scenarios")
-            
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch scenarios")
+
         return response.data
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch scenarios: {str(e)}")
-    
-    
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch scenarios: {str(e)}")
+
+
 def calculate_confidence(input_data):
     """Calculate confidence score based on input completeness"""
     required_fields = [
-        'exp_food', 'exp_nfnd', 'exp_rent', 
+        'exp_food', 'exp_nfnd', 'exp_rent',
         'hhsize', 'region_n', 'hh_water_type'
     ]
-    
-    filled = sum(1 for field in required_fields 
-               if field in input_data and input_data[field] not in [0, None, ""])
-    
+
+    filled = sum(1 for field in required_fields
+                 if field in input_data and input_data[field] not in [0, None, ""])
+
     confidence = min(100, int((filled / len(required_fields)) * 100))
-    
+
     # Boost confidence if all financial fields are filled
     if all(input_data.get(f, 0) > 0 for f in ['exp_food', 'exp_nfnd', 'exp_rent']):
         confidence = min(100, confidence + 20)
-        
+
     return confidence
+
 
 @app.post("/scenarios")
 async def create_scenario(
@@ -528,9 +628,11 @@ async def create_scenario(
             raise HTTPException(status_code=401, detail="Missing token")
         token = auth_header.split(" ")[1]
         supabase_user = get_supabase_with_token(token)
-        
-        print(f"Attempting to create scenario for user {user_id} with prediction {scenario_data.prediction_id}")  # Debug
-        
+
+        # Debug
+        print(
+            f"Attempting to create scenario for user {user_id} with prediction {scenario_data.prediction_id}")
+
         # Verify prediction exists and belongs to user
         try:
             pred_response = supabase_user.table("predictions") \
@@ -539,14 +641,14 @@ async def create_scenario(
                 .eq("user_id", user_id) \
                 .single() \
                 .execute()
-                
+
             if not pred_response.data:
                 print(f"Prediction not found: {scenario_data.prediction_id}")
                 raise HTTPException(
                     status_code=404,
                     detail="Prediction not found or doesn't belong to user"
                 )
-                
+
             print(f"Found prediction: {pred_response.data}")  # Debug
         except Exception as e:
             print(f"Prediction lookup error: {str(e)}")
@@ -572,30 +674,31 @@ async def create_scenario(
         }
 
         print(f"Attempting to insert: {scenario_record}")  # Debug
-        
+
         # Insert scenario
         try:
             insert_response = supabase_user.table("scenarios")\
                 .insert(scenario_record)\
                 .execute()
-                
+
             if not insert_response.data:
                 print("Empty response from Supabase insert")
                 raise HTTPException(
                     status_code=500,
                     detail="Scenario creation failed - no data returned"
                 )
-                
-            print(f"Successfully created scenario: {insert_response.data[0]}")  # Debug
+
+            # Debug
+            print(f"Successfully created scenario: {insert_response.data[0]}")
             return insert_response.data[0]
-            
+
         except Exception as e:
             print(f"Insert error: {str(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to create scenario in database: {str(e)}"
             )
-            
+
     except HTTPException as he:
         print(f"HTTPException: {he.detail}")
         raise
@@ -605,6 +708,7 @@ async def create_scenario(
             status_code=500,
             detail=f"Unexpected error creating scenario: {str(e)}"
         )
+
 
 @app.post("/scenarios/{scenario_id}/set-active")
 async def set_active_scenario(
@@ -617,21 +721,24 @@ async def set_active_scenario(
             .update({"is_active": False})\
             .eq("user_id", user_id)\
             .execute()
-            
+
         # Then activate this one
         response = supabase.table("scenarios")\
             .update({"is_active": True})\
             .eq("id", scenario_id)\
             .eq("user_id", user_id)\
             .execute()
-            
+
         if response.error:
-            raise HTTPException(status_code=500, detail="Failed to set active scenario")
-            
+            raise HTTPException(
+                status_code=500, detail="Failed to set active scenario")
+
         return {"success": True}
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to set active scenario: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to set active scenario: {str(e)}")
+
 
 @app.delete("/scenarios/{scenario_id}")
 async def delete_scenario(
@@ -644,12 +751,13 @@ async def delete_scenario(
             .eq("id", scenario_id)\
             .eq("user_id", user_id)\
             .execute()
-            
-        if response.error:
-            raise HTTPException(status_code=500, detail="Failed to delete scenario")
-            
-        return {"success": True}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete scenario: {str(e)}")
 
+        if response.error:
+            raise HTTPException(
+                status_code=500, detail="Failed to delete scenario")
+
+        return {"success": True}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete scenario: {str(e)}")
