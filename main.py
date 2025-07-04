@@ -110,9 +110,17 @@ async def get_user_predictions(
         )
 
 @app.get("/profile")
-async def get_profile(user_id: str = Depends(verify_token)):
+async def get_profile(request: Request,user_id: str = Depends(verify_token)):
     try:
-        response = supabase.table("profiles")\
+        # 🔐 Get token from header
+        auth_header = request.headers.get("authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing token")
+        token = auth_header.split(" ")[1]
+
+        # ✅ Use user-authenticated Supabase client
+        supabase_user = get_supabase_with_token(token)
+        response = supabase_user.table("profiles")\
             .select("*")\
             .eq("id", user_id)\
             .single()\
@@ -125,6 +133,49 @@ async def get_profile(user_id: str = Depends(verify_token)):
             )
             
         return response.data
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch profile: {str(e)}"
+        )
+        
+@app.get("/profile/{profile_id}")
+async def get_profile_by_id(
+    profile_id: str,
+    request: Request,
+    current_user_id: str = Depends(verify_token)
+):
+    try:
+        # 🔐 Get token from header
+        auth_header = request.headers.get("authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing token")
+        token = auth_header.split(" ")[1]
+
+        # ✅ Use user-authenticated Supabase client
+        supabase_user = get_supabase_with_token(token)
+        
+        # First check if the requesting user has permission to view this profile
+        # (Add your specific authorization logic here)
+        # For example, you might want to restrict this to admin users only
+        # or users with specific relationships
+        
+        # For now, we'll just verify the profile exists and return it
+        response = supabase_user.table("profiles")\
+            .select("*")\
+            .eq("id", profile_id)\
+            .single()\
+            .execute()
+            
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Profile not found"
+            )
+            
+        return response.data
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
