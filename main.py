@@ -595,7 +595,7 @@ async def get_scenarios(request: Request, user_id: str = Depends(verify_token)):
         raise HTTPException(
             status_code=500, detail=f"Failed to fetch scenarios: {str(e)}")
 
-
+# calculate we need to add model not backend
 def calculate_confidence(input_data):
     """Calculate confidence score based on input completeness"""
     required_fields = [
