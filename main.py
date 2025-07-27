@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth.verify_token import verify_token
 from schemes.expenditure import ExpenditureInput
 from schemes.compare import ComparisonRequest, ComparisonResult
+from schemes.analytics import ExpenseOverviewResponse, ExpenseCategoriesResponse, ExpenseTrendsResponse, Granularity, TrendDataPoint, PredictionSummary, PredictionOverviewResponse, InputCategoryItem, PredictionCategoriesResponse, PredictionTrendItem, PredictionTrendsResponse
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
 import joblib
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 import re
 import logging
 import time
-from calendar import monthrange
+from calendar import monthrange, month_name
 
 # Load environment variables
 load_dotenv()
@@ -520,4 +521,659 @@ async def compare_expenses(
         raise HTTPException(
             status_code=500,
             detail=f"Comparison failed: {str(e)}"
+        )
+
+# Analytics endpoints
+# analytics/expense-overview
+@app.get("/analytics/expense-overview", response_model=ExpenseOverviewResponse)
+async def get_expense_overview(
+    request: Request,
+    period: str,  # Format: "YYYY-MM" for month or "YYYY" for year
+    user_id: str = Depends(verify_token)
+):
+    """
+    Get expense overview data for a specific period (month or year)
+    
+    Parameters:
+    - period: Either "YYYY-MM" for monthly data or "YYYY" for yearly data
+    - user_id: Authenticated user ID from token
+    
+    Returns:
+    - Total amount spent
+    - Transaction count
+    - Recurring vs one-time breakdown
+    - Essential vs non-essential breakdown
+    - Top spending category
+    - Average daily spending
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Validate period format
+        if len(period) == 7 and period[4] == '-':  # YYYY-MM format
+            start_date = f"{period}-01"
+            last_day = monthrange(int(period[:4]), int(period[5:7]))[1]
+            end_date = f"{period}-{last_day:02d}"
+            days_in_period = last_day
+        elif len(period) == 4:  # YYYY format
+            start_date = f"{period}-01-01"
+            end_date = f"{period}-12-31"
+            days_in_period = 366 if int(period) % 4 == 0 else 365  # Account for leap year
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid period format. Use YYYY-MM for month or YYYY for year"
+            )
+
+        # Fetch expenses for the period
+        expenses_res = supabase_user.table("expenses") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .gte("date", start_date) \
+            .lte("date", end_date) \
+            .execute()
+
+        expenses = expenses_res.data
+
+        if not expenses:
+            return ExpenseOverviewResponse(
+                total_amount=0,
+                transaction_count=0,
+                recurring_vs_one_time={"recurring": 0, "one_time": 0},
+                essential_vs_non_essential={"essential": 0, "non_essential": 0},
+                top_category="None",
+                avg_daily_spending=0
+            )
+
+        # Calculate metrics
+        total_amount = 0
+        transaction_count = len(expenses)
+        recurring = {"recurring": 0, "one_time": 0}
+        essential = {"essential": 0, "non_essential": 0}
+        categories = defaultdict(float)
+
+        for expense in expenses:
+            amount = expense["amount"]
+            total_amount += amount
+
+            # Handle recurring expenses
+            if expense["is_recurring"]:
+                interval = expense["recurrence_interval"]
+                if interval == "weekly":
+                    amount *= 4.33  # Approximate weeks in a month
+                elif interval == "yearly":
+                    amount /= 12
+                recurring["recurring"] += amount
+            else:
+                recurring["one_time"] += amount
+
+            # Handle essential expenses
+            if expense["is_essential"]:
+                essential["essential"] += amount
+            else:
+                essential["non_essential"] += amount
+
+            # Track categories
+            categories[expense["category"]] += amount
+
+        # Determine top category
+        top_category = max(categories.items(), key=lambda x: x[1])[0] if categories else "None"
+
+        # Calculate average daily spending
+        avg_daily = total_amount / days_in_period
+
+        return ExpenseOverviewResponse(
+            total_amount=round(total_amount, 2),
+            transaction_count=transaction_count,
+            recurring_vs_one_time={
+                "recurring": round(recurring["recurring"], 2),
+                "one_time": round(recurring["one_time"], 2)
+            },
+            essential_vs_non_essential={
+                "essential": round(essential["essential"], 2),
+                "non_essential": round(essential["non_essential"], 2)
+            },
+            top_category=top_category,
+            avg_daily_spending=round(avg_daily, 2)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in expense overview: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate expense overview: {str(e)}"
+        )
+
+# analytics/expense-categories
+@app.get("/analytics/expense-categories", response_model=ExpenseCategoriesResponse)
+async def get_expense_categories(
+    request: Request,
+    period: str,  # Format: "YYYY-MM" for month or "YYYY" for year
+    user_id: str = Depends(verify_token)
+):
+    """
+    Get category breakdown for expenses in a specific period
+    
+    Parameters:
+    - period: Either "YYYY-MM" for monthly data or "YYYY" for yearly data
+    - user_id: Authenticated user ID from token
+    
+    Returns:
+    - Period analyzed
+    - Total amount spent
+    - List of categories with:
+      - Amount spent
+      - Percentage of total
+      - Number of transactions
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Validate period and set date range
+        if len(period) == 7 and period[4] == '-':  # YYYY-MM format
+            start_date = f"{period}-01"
+            last_day = monthrange(int(period[:4]), int(period[5:7]))[1]
+            end_date = f"{period}-{last_day:02d}"
+            period_label = f"{period[:4]} {month_name[int(period[5:7])]}"
+        elif len(period) == 4:  # YYYY format
+            start_date = f"{period}-01-01"
+            end_date = f"{period}-12-31"
+            period_label = period
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid period format. Use YYYY-MM for month or YYYY for year"
+            )
+
+        # Fetch expenses for the period
+        expenses_res = supabase_user.table("expenses") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .gte("date", start_date) \
+            .lte("date", end_date) \
+            .execute()
+
+        expenses = expenses_res.data
+
+        if not expenses:
+            return ExpenseCategoriesResponse(
+                period=period_label,
+                total_amount=0,
+                categories=[]
+            )
+
+        # Calculate category breakdown
+        category_stats = defaultdict(lambda: {"amount": 0, "count": 0})
+        total_amount = 0
+
+        for expense in expenses:
+            amount = expense["amount"]
+            category = expense["category"]
+            
+            # Handle recurring expenses
+            if expense["is_recurring"]:
+                interval = expense["recurrence_interval"]
+                if interval == "weekly":
+                    amount *= 4.33  # Approximate weeks in a month
+                elif interval == "yearly":
+                    amount /= 12
+            
+            category_stats[category]["amount"] += amount
+            category_stats[category]["count"] += 1
+            total_amount += amount
+
+        # Prepare response
+        categories = []
+        for category, stats in category_stats.items():
+            percentage = (stats["amount"] / total_amount) * 100 if total_amount > 0 else 0
+            categories.append({
+                "category": category,
+                "amount": round(stats["amount"], 2),
+                "percentage": round(percentage, 2),
+                "transaction_count": stats["count"]
+            })
+
+        # Sort by amount (descending)
+        categories.sort(key=lambda x: x["amount"], reverse=True)
+
+        return ExpenseCategoriesResponse(
+            period=period_label,
+            total_amount=round(total_amount, 2),
+            categories=categories
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in expense categories: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate category breakdown: {str(e)}"
+        )
+        
+# analytics/expense-trends
+@app.get("/analytics/expense-trends", response_model=ExpenseTrendsResponse)
+async def get_expense_trends(
+    request: Request,
+    period: str,            # Format: "YYYY-MM" or "YYYY"
+    granularity: Granularity = Granularity.daily,
+    user_id: str = Depends(verify_token)
+):
+    """
+    Get time-series expense data for trend analysis
+    
+    Parameters:
+    - period: "YYYY-MM" for month or "YYYY" for year
+    - granularity: "daily" or "weekly" aggregation
+    - user_id: Authenticated user ID
+    
+    Returns:
+    - Formatted period label
+    - Chosen granularity
+    - Total amount for period
+    - Time-series data points with:
+      - Date/Week identifier
+      - Amount spent
+      - Transaction count
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Validate period and set date range
+        if len(period) == 7 and period[4] == '-':  # Monthly
+            start_date = f"{period}-01"
+            last_day = monthrange(int(period[:4]), int(period[5:7]))[1]
+            end_date = f"{period}-{last_day:02d}"
+            period_label = f"{period[:4]} {month_name[int(period[5:7])]}"
+        elif len(period) == 4:  # Yearly
+            start_date = f"{period}-01-01"
+            end_date = f"{period}-12-31"
+            period_label = period
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid period format. Use YYYY-MM or YYYY"
+            )
+
+        # Fetch raw expenses
+        expenses_res = supabase_user.table("expenses") \
+            .select("amount, date, is_recurring, recurrence_interval") \
+            .eq("user_id", user_id) \
+            .gte("date", start_date) \
+            .lte("date", end_date) \
+            .execute()
+
+        expenses = expenses_res.data
+
+        # Initialize time buckets
+        date_format = "%Y-%m-%d"
+        current = datetime.strptime(start_date, date_format)
+        end = datetime.strptime(end_date, date_format)
+        trends = {}
+
+        # Create all possible time buckets first
+        while current <= end:
+            if granularity == Granularity.weekly:
+                week_start = current - timedelta(days=current.weekday())
+                week_end = week_start + timedelta(days=6)
+                key = f"{week_start.strftime(date_format)} to {week_end.strftime(date_format)}"
+                current = week_end + timedelta(days=1)  # Jump to next week
+            else:  # daily
+                key = current.strftime(date_format)
+                current += timedelta(days=1)
+            
+            trends[key] = {"amount": 0, "count": 0}
+
+        # Process expenses into buckets
+        total_amount = 0
+        for expense in expenses:
+            amount = expense["amount"]
+            date = expense["date"]
+            
+            # Handle recurring expenses
+            if expense["is_recurring"]:
+                interval = expense["recurrence_interval"]
+                if interval == "weekly":
+                    amount *= 0.142  # Daily equivalent (1/7)
+                elif interval == "yearly":
+                    amount /= 365
+            
+            # Determine time bucket
+            expense_date = datetime.strptime(date, date_format)
+            if granularity == Granularity.weekly:
+                week_start = expense_date - timedelta(days=expense_date.weekday())
+                week_end = week_start + timedelta(days=6)
+                bucket_key = f"{week_start.strftime(date_format)} to {week_end.strftime(date_format)}"
+            else:
+                bucket_key = date
+            
+            # Add to bucket
+            trends[bucket_key]["amount"] += amount
+            trends[bucket_key]["count"] += 1
+            total_amount += amount
+
+        # Convert to response format
+        trend_points = [
+            TrendDataPoint(
+                date=date_range,
+                amount=round(stats["amount"], 2),
+                transaction_count=stats["count"]
+            )
+            for date_range, stats in sorted(trends.items())
+        ]
+
+        return ExpenseTrendsResponse(
+            period=period_label,
+            granularity=granularity,
+            total_amount=round(total_amount, 2),
+            trends=trend_points
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in expense trends: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate trends: {str(e)}"
+        )
+        
+        
+# analytics/prediction-overview
+@app.get("/analytics/prediction-overview", response_model=PredictionOverviewResponse)
+async def get_prediction_overview(
+    request: Request,
+    user_id: str = Depends(verify_token)
+):
+    """
+    Get summary of all predictions for a user
+    
+    Parameters:
+    - user_id: Authenticated user ID
+    
+    Returns:
+    - Total number of predictions
+    - Average predicted amount
+    - Average monthly equivalent
+    - Details of latest prediction
+    - Distribution of models used
+    - Totals of input categories
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Fetch all predictions
+        predictions_res = supabase_user.table("predictions") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        predictions = predictions_res.data
+
+        if not predictions:
+            return PredictionOverviewResponse(
+                total_predictions=0,
+                average_prediction=0,
+                average_monthly=0,
+                latest_prediction=None,
+                model_distribution={},
+                input_category_totals={}
+            )
+
+        # Calculate summary statistics
+        total = len(predictions)
+        sum_pred = sum(p["predicted_exp"] for p in predictions)
+        avg_pred = sum_pred / total
+        avg_monthly = avg_pred / 12
+
+        # Model distribution
+        models = defaultdict(int)
+        for p in predictions:
+            models[p["model_used"]] += 1
+
+        # Input category totals (sum across all predictions)
+        input_totals = defaultdict(float)
+        for p in predictions:
+            for key, value in p["input_data"].items():
+                if key.endswith("_Expenditure"):
+                    category = key.replace("_Expenditure", "").replace("_", " ")
+                    input_totals[category] += value
+
+        # Latest prediction details
+        latest = predictions[0]
+        monthly_equivalent = latest["predicted_exp"] / 12
+        
+        # Extract key inputs for summary
+        input_summary = {
+            "Region": latest["input_data"].get("Region"),
+            "Residence": latest["input_data"].get("Residence_Type"),
+            "Household Size": latest["input_data"].get("Number_of_Members"),
+            "Main Expenses": {k: v for k, v in latest["input_data"].items() 
+                            if k.endswith("_Expenditure") and v > 0}
+        }
+
+        return PredictionOverviewResponse(
+            total_predictions=total,
+            average_prediction=round(avg_pred, 2),
+            average_monthly=round(avg_monthly, 2),
+            latest_prediction=PredictionSummary(
+                prediction_id=latest["id"],
+                predicted_amount=round(latest["predicted_exp"], 2),
+                monthly_equivalent=round(monthly_equivalent, 2),
+                model_used=latest["model_used"],
+                created_at=latest["created_at"],
+                input_summary=input_summary
+            ),
+            model_distribution=dict(models),
+            input_category_totals={k: round(v, 2) for k, v in input_totals.items()}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in prediction overview: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate prediction overview: {str(e)}"
+        )
+        
+# analytics/prediction-categories
+@app.get("/analytics/prediction-categories", response_model=PredictionCategoriesResponse)
+async def get_prediction_categories(
+    request: Request,
+    user_id: str = Depends(verify_token)
+):
+    """
+    Get breakdown of input categories used in predictions
+    
+    Parameters:
+    - user_id: Authenticated user ID
+    
+    Returns:
+    - Total number of predictions
+    - List of input categories with:
+      - Total amount across all predictions
+      - Average amount per prediction
+      - How many predictions used this category
+      - Last used timestamp
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Fetch all predictions
+        predictions_res = supabase_user.table("predictions") \
+            .select("id, input_data, created_at") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        predictions = predictions_res.data
+
+        if not predictions:
+            return PredictionCategoriesResponse(
+                total_predictions=0,
+                categories=[]
+            )
+
+        # Process category data
+        categories = defaultdict(lambda: {
+            "total": 0,
+            "count": 0,
+            "last_used": "1970-01-01"
+        })
+
+        for pred in predictions:
+            for key, value in pred["input_data"].items():
+                if key.endswith("_Expenditure"):
+                    # Clean category name (e.g., "Food_Expenditure" → "Food")
+                    category = key.replace("_Expenditure", "").replace("_", " ")
+                    
+                    # Update category stats
+                    categories[category]["total"] += float(value)
+                    categories[category]["count"] += 1
+                    
+                    # Track most recent usage
+                    if pred["created_at"] > categories[category]["last_used"]:
+                        categories[category]["last_used"] = pred["created_at"]
+
+        # Convert to response format
+        category_list = []
+        for name, stats in categories.items():
+            category_list.append(InputCategoryItem(
+                category=name,
+                total_amount=round(stats["total"], 2),
+                average_amount=round(stats["total"] / stats["count"], 2),
+                prediction_count=stats["count"],
+                last_used=stats["last_used"]
+            ))
+
+        # Sort by total amount (descending)
+        category_list.sort(key=lambda x: x.total_amount, reverse=True)
+
+        return PredictionCategoriesResponse(
+            total_predictions=len(predictions),
+            categories=category_list
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in prediction categories: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get prediction categories: {str(e)}"
+        )
+        
+@app.get("/analytics/prediction-trends", response_model=PredictionTrendsResponse)
+async def get_prediction_trends(
+    request: Request,
+    user_id: str = Depends(verify_token),
+    limit: int = 100  # Default limit for safety
+):
+    """
+    Get historical prediction data for trend analysis
+    
+    Parameters:
+    - user_id: Authenticated user ID
+    - limit: Maximum number of predictions to return
+    
+    Returns:
+    - Total prediction count
+    - Min/max/average amounts
+    - Time-series data with:
+      - Prediction details
+      - Monthly equivalents
+      - Model information
+      - Key input summaries
+    """
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Fetch predictions (newest first)
+        predictions_res = supabase_user.table("predictions") \
+            .select("id, predicted_exp, model_used, created_at, input_data") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+
+        predictions = predictions_res.data
+
+        if not predictions:
+            return PredictionTrendsResponse(
+                total_predictions=0,
+                min_amount=0,
+                max_amount=0,
+                average_amount=0,
+                trends=[]
+            )
+
+        # Calculate summary stats
+        amounts = [p["predicted_exp"] for p in predictions]
+        total = len(predictions)
+        min_amount = min(amounts)
+        max_amount = max(amounts)
+        avg_amount = sum(amounts) / total
+
+        # Prepare trend items
+        trend_items = []
+        for pred in predictions:
+            # Extract key inputs for summary
+            inputs = pred["input_data"]
+            input_summary = {
+                "region": inputs.get("Region"),
+                "residence": inputs.get("Residence_Type"),
+                "household_size": inputs.get("Number_of_Members"),
+                "main_categories": {
+                    k.replace("_Expenditure", ""): v 
+                    for k, v in inputs.items() 
+                    if k.endswith("_Expenditure") and v > 0
+                }
+            }
+
+            trend_items.append(PredictionTrendItem(
+                prediction_id=pred["id"],
+                created_at=pred["created_at"],
+                predicted_amount=round(pred["predicted_exp"], 2),
+                monthly_equivalent=round(pred["predicted_exp"] / 12, 2),
+                model_used=pred["model_used"],
+                input_summary=input_summary
+            ))
+
+        return PredictionTrendsResponse(
+            total_predictions=total,
+            min_amount=round(min_amount, 2),
+            max_amount=round(max_amount, 2),
+            average_amount=round(avg_amount, 2),
+            trends=trend_items
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in prediction trends: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get prediction trends: {str(e)}"
         )
