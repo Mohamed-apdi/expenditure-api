@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter, BackgroundTasks
 from collections import defaultdict
 from fastapi.middleware.cors import CORSMiddleware
 from auth.verify_token import verify_token
 from schemes.expenditure import ExpenditureInput
+from schemes.compare import ComparisonRequest, ComparisonResult
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
 import joblib
@@ -14,6 +15,9 @@ from typing import Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import re
+import logging
+import time
+from calendar import monthrange
 
 # Load environment variables
 load_dotenv()
@@ -42,10 +46,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configure logging at module level
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    """Middleware to log request processing time"""
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    logger.info(
+        f"Request {request.method} {request.url.path} processed in {process_time:.4f}s",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "duration": process_time
+        }
+    )
+    return response
+
 # Load model safely
 try:
     MODEL_PATH = os.path.join(os.path.dirname(
-        __file__), "model", "model_household_expenditure.pkl")
+        __file__), "model", "household_expenditure_model.pkl")
     model = joblib.load(MODEL_PATH)
 except Exception as e:
     raise RuntimeError(f"Failed to load model: {str(e)}")
@@ -152,15 +180,15 @@ async def predict(
         input_df = pd.DataFrame([data.dict()])
 
         # Make prediction
-        log_pred = model.predict(input_df)[0]
-        prediction = np.expm1(log_pred)
-        rounded_pred = float(round(prediction, 2))
+        pred = model.predict(input_df)[0]
+        print("Raw model output:", pred)
+        rounded_pred = float(round(pred, 2))
 
         # Store prediction
         response = supabase_user.table("predictions").insert({
             "input_data": data.dict(),
             "predicted_exp": rounded_pred,
-            "model_used": "GB",
+            "model_used": "RF",
             "user_id": user_id
         }).execute()
 
@@ -348,416 +376,148 @@ async def prediction_trend(request: Request, user_id: str = Depends(verify_token
         )
 
 
-@app.get("/analytics/monthly-average")
-async def monthly_average(
-    request: Request,
-    user_id: str = Depends(verify_token),
-    limit: int = 1000  # optional cap
-):
-    try:
-        # 🔐 Get token from header
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Use user-authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-
-        # 🗂️ Fetch predictions
-        response = supabase_user.table("predictions")\
-            .select("predicted_exp, created_at")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        if not response.data:
-            return []
-
-        # 📅 Group by year-month and calculate averages
-        monthly_data = defaultdict(list)
-        for row in response.data:
-            if row["predicted_exp"] is not None:
-                month_key = row["created_at"][:7]  # "YYYY-MM"
-                monthly_data[month_key].append(row["predicted_exp"])
-
-        average_per_month = [
-            {
-                "month": month,
-                "average_predicted_exp": round(sum(values) / len(values), 2)
-            }
-            for month, values in sorted(monthly_data.items(), reverse=True)
-        ]
-
-        return average_per_month
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch monthly averages: {str(e)}"
-        )
-
-
-@app.get("/analytics/total-count")
-async def total_prediction_count(
+# Import the Api compare expenses and predictions
+@app.post("/compare", response_model=ComparisonResult)
+async def compare_expenses(
+    request_data: ComparisonRequest,
     request: Request,
     user_id: str = Depends(verify_token)
 ):
-    try:
-        # 🔐 Get Bearer token
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-
-        # 📊 Query count
-        response = supabase_user.table("predictions")\
-            .select("id", count="exact")\
-            .eq("user_id", user_id)\
-            .execute()
-
-        if response.error:
-            raise HTTPException(
-                status_code=500, detail="Failed to count predictions")
-
-        return {"total_predictions": response.count}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@app.get("/analytics/expense-breakdown")
-async def expense_breakdown(
-    request: Request,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        # 🔐 Get token
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Authenticated client
-        supabase_user = get_supabase_with_token(token)
-
-        # 📥 Fetch predictions for the user
-        response = supabase_user.table("predictions")\
-            .select("input_data")\
-            .eq("user_id", user_id)\
-            .execute()
-
-        if not response.data:
-            return {
-                "food": 0,
-                "rent": 0,
-                "other": 0
-            }
-
-        food_total = 0
-        rent_total = 0
-        other_total = 0
-
-        for row in response.data:
-            input_data = row.get("input_data", {})
-            food_total += float(input_data.get("food_exp", 0))
-            rent_total += float(input_data.get("rent_exp", 0))
-            other_total += float(input_data.get("other_exp", 0))
-
-        return {
-            "food": round(food_total, 2),
-            "rent": round(rent_total, 2),
-            "other": round(other_total, 2)
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to compute breakdown: {str(e)}"
-        )
-
-
-@app.get("/analytics/recent")
-async def recent_predictions(
-    request: Request,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        # 🔐 Get token
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-
-        # 📅 7 days ago date (ISO format)
-        seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
-
-        # 📥 Query predictions after 7 days ago
-        response = supabase_user.table("predictions")\
-            .select("predicted_exp, created_at")\
-            .eq("user_id", user_id)\
-            .gte("created_at", seven_days_ago)\
-            .order("created_at", desc=True)\
-            .execute()
-
-        if response.error:
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch recent predictions")
-
-        return [
-            {
-                "date": row["created_at"][:10],
-                "predicted_exp": row["predicted_exp"]
-            }
-            for row in response.data if row["predicted_exp"] is not None
-        ]
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error fetching recent predictions: {str(e)}"
-        )
-
-
-@app.get("/analytics/peak-day")
-async def get_peak_prediction_day(
-    request: Request,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        # 🔐 Extract token
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-
-        # 🔍 Query predictions sorted by predicted_exp descending
-        response = supabase_user.table("predictions")\
-            .select("predicted_exp, created_at")\
-            .eq("user_id", user_id)\
-            .order("predicted_exp", desc=True)\
-            .limit(1)\
-            .execute()
-
-        if response.error or not response.data:
-            raise HTTPException(status_code=404, detail="No predictions found")
-
-        peak = response.data[0]
-
-        return {
-            "peak_date": peak["created_at"][:10],  # YYYY-MM-DD
-            "predicted_exp": peak["predicted_exp"]
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get peak day: {str(e)}"
-        )
-
-
-class ScenarioCreate(BaseModel):
-    prediction_id: str
-    name: Optional[str] = None
-
-
-@app.get("/scenarios")
-async def get_scenarios(request: Request, user_id: str = Depends(verify_token)):
+    
     try:
         # Get authenticated Supabase client
         auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
         token = auth_header.split(" ")[1]
         supabase_user = get_supabase_with_token(token)
 
-        # Get all scenarios for user with their prediction data
-        response = supabase_user.rpc("get_user_scenarios", {
-                                     "user_id_param": user_id}).execute()
+        # 1. Fetch the selected prediction
+        prediction_res = supabase_user.table("predictions") \
+            .select("*") \
+            .eq("id", request_data.prediction.prediction_id) \
+            .eq("user_id", user_id) \
+            .single() \
+            .execute()
+        
+        if not prediction_res.data:
+            raise HTTPException(status_code=404, detail="Prediction not found")
 
-        if response.error:
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch scenarios")
+        prediction = prediction_res.data
+        
+        # Initialize date variables
+        start_date = None
+        end_date = None
 
-        return response.data
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to fetch scenarios: {str(e)}")
-
-# calculate we need to add model not backend
-def calculate_confidence(input_data):
-    """Calculate confidence score based on input completeness"""
-    required_fields = [
-        'exp_food', 'exp_nfnd', 'exp_rent',
-        'hhsize', 'region_n', 'hh_water_type'
-    ]
-
-    filled = sum(1 for field in required_fields
-                 if field in input_data and input_data[field] not in [0, None, ""])
-
-    confidence = min(100, int((filled / len(required_fields)) * 100))
-
-    # Boost confidence if all financial fields are filled
-    if all(input_data.get(f, 0) > 0 for f in ['exp_food', 'exp_nfnd', 'exp_rent']):
-        confidence = min(100, confidence + 20)
-
-    return confidence
-
-
-@app.post("/scenarios")
-async def create_scenario(
-    scenario_data: ScenarioCreate,
-    request: Request,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        # Get authenticated Supabase client
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-        supabase_user = get_supabase_with_token(token)
-
-        # Debug
-        print(
-            f"Attempting to create scenario for user {user_id} with prediction {scenario_data.prediction_id}")
-
-        # Verify prediction exists and belongs to user
-        try:
-            pred_response = supabase_user.table("predictions") \
+        # 2. Fetch selected expenses
+        if request_data.expenses.expense_ids:
+            # Compare specific selected expenses
+            expenses_res = supabase_user.table("expenses") \
                 .select("*") \
-                .eq("id", scenario_data.prediction_id) \
+                .in_("id", request_data.expenses.expense_ids) \
                 .eq("user_id", user_id) \
-                .single() \
+                .execute()
+        else:
+            if not request_data.expenses.month or not request_data.expenses.year:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Must provide either expense_ids or month/year"
+                )
+            # Add debug print
+            print(f"Querying expenses between {start_date} and {end_date} for user {user_id}")
+            # start_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-01"
+            # end_date = (datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=31)).strftime("%Y-%m-%d")
+            
+            # Calculate exact date range for the month
+            _, last_day = monthrange(request_data.expenses.year, request_data.expenses.month)
+            start_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-01"
+            end_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-{last_day:02d}"
+            
+            expenses_res = supabase_user.table("expenses") \
+                .select("*") \
+                .eq("user_id", user_id) \
+                .gte("date", start_date) \
+                .lte("date", end_date) \
                 .execute()
 
-            if not pred_response.data:
-                print(f"Prediction not found: {scenario_data.prediction_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail="Prediction not found or doesn't belong to user"
-                )
+        expenses = expenses_res.data
 
-            print(f"Found prediction: {pred_response.data}")  # Debug
-        except Exception as e:
-            print(f"Prediction lookup error: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error verifying prediction: {str(e)}"
-            )
+        if not expenses:
+            raise HTTPException(status_code=404, detail="No expenses found for comparison")
 
-        # Calculate confidence
-        try:
-            confidence = calculate_confidence(pred_response.data["input_data"])
-            print(f"Calculated confidence: {confidence}")  # Debug
-        except Exception as e:
-            print(f"Confidence calculation error: {str(e)}")
-            confidence = 50  # Default value if calculation fails
+        # 3. Normalize time periods and calculate totals
+        # Convert yearly prediction to monthly
+        monthly_prediction = prediction["predicted_exp"] / 12
+        
+        # Calculate actual monthly spending (handling recurring expenses)
+        actual_monthly = 0
+        category_totals = defaultdict(float)
+        recurring_adjustments = False
 
-        # Create scenario record
-        scenario_record = {
-            "user_id": user_id,
-            "prediction_id": scenario_data.prediction_id,
-            "name": scenario_data.name or f"Scenario {datetime.now().strftime('%Y-%m-%d')}",
-            "confidence": confidence
+        for expense in expenses:
+            amount = expense["amount"]
+            
+            # Handle recurring expenses
+            if expense["is_recurring"]:
+                recurring_adjustments = True
+                interval = expense["recurrence_interval"]
+                if interval == "weekly":
+                    amount *= 4.33  # Approximate weeks in a month
+                elif interval == "yearly":
+                    amount /= 12
+            
+            actual_monthly += amount
+            category_totals[expense["category"]] += amount
+
+        # 4. Calculate variance
+        variance = ((actual_monthly - monthly_prediction) / monthly_prediction) * 100
+        
+        # 5. Prepare category breakdown
+        predicted_categories = {
+            "Food": prediction["input_data"].get("Food_Expenditure", 0) / 12,
+            "Housing": prediction["input_data"].get("Housing_Expenditure", 0) / 12,
+            "Transport": prediction["input_data"].get("Transport_Expenditure", 0) / 12,
+            "Utilities": prediction["input_data"].get("Utilities_Expenditure", 0) / 12,
+            "Other": (prediction["input_data"].get("NonFood_Expenditure", 0) - 
+                     prediction["input_data"].get("Transport_Expenditure", 0) -
+                     prediction["input_data"].get("Utilities_Expenditure", 0)) / 12
         }
 
-        print(f"Attempting to insert: {scenario_record}")  # Debug
+        category_comparisons = []
+        for category, actual in category_totals.items():
+            predicted = predicted_categories.get(category, 0)
+            diff = actual - predicted
+            percentage_diff = (diff / predicted) * 100 if predicted != 0 else 0
+            category_comparisons.append({
+                "category": category,
+                "actual": round(actual, 2),
+                "predicted": round(predicted, 2),
+                "difference": round(diff, 2),
+                "percentage_diff": round(percentage_diff, 2)
+            })
 
-        # Insert scenario
-        try:
-            insert_response = supabase_user.table("scenarios")\
-                .insert(scenario_record)\
-                .execute()
+        # 6. Determine comparison message
+        if abs(variance) < 10:
+            message = "Your spending aligns closely with predictions"
+        elif variance > 0:
+            message = f"You're spending {abs(variance):.1f}% more than predicted"
+        else:
+            message = f"You're spending {abs(variance):.1f}% less than predicted"
 
-            if not insert_response.data:
-                print("Empty response from Supabase insert")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Scenario creation failed - no data returned"
-                )
+        # 7. Return comparison result
+        return {
+            "total_actual": round(actual_monthly, 2),
+            "total_predicted_monthly": round(monthly_prediction, 2),
+            "variance_percentage": round(variance, 2),
+            "message": message,
+            "category_breakdown": category_comparisons,
+            "confidence_score": 75,  # Could come from model metadata
+            "time_period_note": "Yearly prediction converted to monthly equivalent",
+            "is_recurring_adjusted": recurring_adjustments
+        }
 
-            # Debug
-            print(f"Successfully created scenario: {insert_response.data[0]}")
-            return insert_response.data[0]
-
-        except Exception as e:
-            print(f"Insert error: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create scenario in database: {str(e)}"
-            )
-
-    except HTTPException as he:
-        print(f"HTTPException: {he.detail}")
+    except HTTPException:
         raise
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected error creating scenario: {str(e)}"
+            detail=f"Comparison failed: {str(e)}"
         )
-
-
-@app.post("/scenarios/{scenario_id}/set-active")
-async def set_active_scenario(
-    scenario_id: str,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        # First deactivate all other scenarios
-        supabase.table("scenarios")\
-            .update({"is_active": False})\
-            .eq("user_id", user_id)\
-            .execute()
-
-        # Then activate this one
-        response = supabase.table("scenarios")\
-            .update({"is_active": True})\
-            .eq("id", scenario_id)\
-            .eq("user_id", user_id)\
-            .execute()
-
-        if response.error:
-            raise HTTPException(
-                status_code=500, detail="Failed to set active scenario")
-
-        return {"success": True}
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to set active scenario: {str(e)}")
-
-
-@app.delete("/scenarios/{scenario_id}")
-async def delete_scenario(
-    scenario_id: str,
-    user_id: str = Depends(verify_token)
-):
-    try:
-        response = supabase.table("scenarios")\
-            .delete()\
-            .eq("id", scenario_id)\
-            .eq("user_id", user_id)\
-            .execute()
-
-        if response.error:
-            raise HTTPException(
-                status_code=500, detail="Failed to delete scenario")
-
-        return {"success": True}
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to delete scenario: {str(e)}")
