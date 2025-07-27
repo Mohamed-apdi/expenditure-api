@@ -26,10 +26,10 @@ pip-wheel-metadata/
 .ipynb_checkpoints/
 
 # Machine learning models (except your specific model)
-*.pkl
-*.h5
-*.joblib
-!model/model_household_expenditure.pkl  # Keep your specific model
+# *.pkl
+# *.h5
+# *.joblib
+# !model/household_expenditure_model.pkl  # Keep your specific model
 
 # Logs and databases
 *.log
