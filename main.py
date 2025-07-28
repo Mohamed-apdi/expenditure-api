@@ -73,8 +73,7 @@ async def add_process_time_header(request: Request, call_next):
 
 # Load model safely
 try:
-    MODEL_PATH = os.path.join(os.path.dirname(
-        __file__), "model", "household_expenditure_model.pkl")
+    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "household_expenditure_model.pkl")
     model = joblib.load(MODEL_PATH)
 except Exception as e:
     raise RuntimeError(f"Failed to load model: {str(e)}")
