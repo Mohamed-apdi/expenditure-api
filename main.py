@@ -19,7 +19,8 @@ import re
 import logging
 import time
 from calendar import monthrange, month_name
-
+from fastapi import BackgroundTasks
+from auth.send_otp import save_and_send_otp
 # Load environment variables
 load_dotenv()
 
@@ -83,80 +84,79 @@ except Exception as e:
 async def health_check():
     return {"status": "healthy", "message": "Household Expenditure Predictor API"}
 
+@app.post("/auth/request-otp")
+async def request_otp(background_tasks: BackgroundTasks, email: str):
+    # Check if email already registered
+    user_check = supabase.table("auth.users")\
+        .select("email")\
+        .eq("email", email)\
+        .maybe_single()\
+        .execute()
+    
+    if user_check.data:
+        raise HTTPException(status_code=400, detail="Email already registered")
 
-# Add this new endpoint for user signup
-@app.post("/auth/signup")
-async def signup_user(user_data: UserSignup):
-    try:
-        auth_response = supabase.auth.sign_up({
-            'email': user_data.email,
-            'password': user_data.password,
-            'options': {
-                'data': {
-                    'full_name': user_data.full_name
-                }
+    background_tasks.add_task(save_and_send_otp, email)
+    return {"message": "OTP sent to email"}
+
+@app.post("/auth/verify-otp")
+async def verify_otp(email: str, otp: str):
+    result = supabase.table("email_otp_verification")\
+        .select("*")\
+        .eq("email", email)\
+        .eq("otp", otp)\
+        .eq("verified", False)\
+        .maybe_single()\
+        .execute()
+
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+    expires_at = datetime.fromisoformat(result.data["expires_at"])
+    if datetime.utcnow() > expires_at:
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    # Mark as verified
+    supabase.table("email_otp_verification")\
+        .update({"verified": True})\
+        .eq("id", result.data["id"])\
+        .execute()
+
+    return {"message": "Email verified successfully"}
+
+@app.post("/auth/signup-with-verified-email")
+async def signup_with_verified_email(
+    email: str,
+    password: str,
+    full_name: str
+):
+    # Check if email was verified
+    verification = supabase.table("email_otp_verification")\
+        .select("*")\
+        .eq("email", email)\
+        .eq("verified", True)\
+        .maybe_single()\
+        .execute()
+
+    if not verification.data:
+        raise HTTPException(status_code=400, detail="Email not verified")
+
+    # Create the user
+    auth_response = supabase.auth.sign_up({
+        "email": email,
+        "password": password,
+        "options": {
+            "data": {
+                "full_name": full_name,
+                "email_verified": True
             }
-        })
-
-        return {
-            "message": "User created successfully",
-            "user_id": auth_response.user.id
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Signup failed: {str(e)}")
+    })
 
+    if auth_response.error:
+        raise HTTPException(status_code=400, detail=auth_response.error.message)
 
-# Modify your existing get_profile endpoint to handle missing profiles more gracefully
-def is_phone_number(input_str: str) -> bool:
-    """Check if input is a phone number"""
-    # Simple international phone number regex
-    pattern = r'^\+?[0-9\s\-\(\)]{7,}$'
-    return re.match(pattern, input_str) is not None
-
-
-@app.post("/auth/login")
-async def login_user(login_data: UserLogin):
-    try:
-        # Determine if login is using phone or email
-        if is_phone_number(login_data.email):
-            # Step 1: Find user by phone
-            user_profile = supabase.table("profiles") \
-                .select("id") \
-                .eq("phone", login_data.email) \
-                .maybe_single() \
-                .execute()
-
-            if not user_profile.data:
-                raise HTTPException(status_code=404, detail="Phone not found")
-
-            # Step 2: Get email from auth.users
-            auth_user = supabase.auth.admin.get_user_by_id(
-                user_profile.data['id'])
-            email = auth_user.user.email
-
-            # Step 3: Login with email
-            auth_response = supabase.auth.sign_in_with_password({
-                "email": email,
-                "password": login_data.password
-            })
-        else:
-            # Regular email login
-            auth_response = supabase.auth.sign_in_with_password({
-                "email": login_data.email,
-                "password": login_data.password
-            })
-
-        return {
-            "access_token": auth_response.session.access_token,
-            "refresh_token": auth_response.session.refresh_token,
-            "user_id": auth_response.user.id
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Login failed: {str(e)}"
-        )
+    return {"message": "Account created successfully"}
 
 
 @app.post("/predict")
