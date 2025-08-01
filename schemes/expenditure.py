@@ -1,15 +1,18 @@
 from pydantic import BaseModel
 
 class ExpenditureInput(BaseModel):
-    Food_Expenditure: float
-    NonFood_Expenditure: float
-    Housing_Expenditure: float
-    Utilities_Expenditure: float
-    Transport_Expenditure: float
-    Number_of_Members: int
-    Region: str
-    Residence_Type: str
-    Spent_on_Food_Drink_Outside: float
-    General_NonFood_Expenditure: float
-    Livestock_Byproducts_Value: float
-    Business_Revenue: float
+    exp_food: float
+    exp_rent: float
+    exp_Education: float
+    exp_Water: float
+    exp_Electricity: float
+    Savings_or_Insurance_Payment: float
+    Communication_Exp: float
+    hhsize: int
+    Area_Name: str
+    Region_Name: str
+    
+class PredictionOutput(BaseModel):
+    predicted_expenditure: float
+    input_data: dict
+    monthly_equivalent: float

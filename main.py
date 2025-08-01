@@ -3,8 +3,8 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter,
 from collections import defaultdict
 from fastapi.middleware.cors import CORSMiddleware
 from auth.verify_token import verify_token
-from schemes.expenditure import ExpenditureInput
-from schemes.compare import ComparisonRequest, ComparisonResult
+from schemes.expenditure import ExpenditureInput, PredictionOutput
+from schemes.compare import ComparisonRequest, ComparisonResult, CategoryComparison, PredictionComparisonResult, PredictionComparisonRequest
 from schemes.analytics import ExpenseOverviewResponse, ExpenseCategoriesResponse, ExpenseTrendsResponse, Granularity, TrendDataPoint, PredictionSummary, PredictionOverviewResponse, InputCategoryItem, PredictionCategoriesResponse, PredictionTrendItem, PredictionTrendsResponse
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
@@ -74,7 +74,7 @@ async def add_process_time_header(request: Request, call_next):
 
 # Load model safely
 try:
-    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "household_expenditure_model.pkl")
+    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "gradient_boosting_with_categoricals.pkl")
     model = joblib.load(MODEL_PATH)
 except Exception as e:
     raise RuntimeError(f"Failed to load model: {str(e)}")
@@ -159,36 +159,88 @@ async def signup_with_verified_email(
     return {"message": "Account created successfully"}
 
 
-@app.post("/predict")
+# Safely handles prediction with early return for empty/zero inputs
+def safe_predict_with_categoricals(model, input_dict):
+    """
+    Safely handles prediction with early return for empty/zero inputs
+    Args:
+        model: The loaded ML model
+        input_dict: Dictionary containing all input fields
+    Returns:
+        float: Predicted value (0 if all inputs are empty/zero)
+    """
+    # Define which fields are numeric
+    numeric_fields = [
+        "exp_food", "exp_rent", "exp_Education", "exp_Water",
+        "exp_Electricity", "Savings_or_Insurance_Payment", "Communication_Exp", "hhsize"
+    ]
+    
+    # Check if all numeric fields are 0 and strings are empty
+    all_numeric_zero = all(input_dict.get(field, 0) == 0 for field in numeric_fields)
+    area_empty = input_dict.get("Area_Name", "").strip() == ""
+    region_empty = input_dict.get("Region_Name", "").strip() == ""
+
+    # If everything is empty/zero, return 0 directly
+    if all_numeric_zero and area_empty and region_empty:
+        return 0.0
+
+    # Prepare data for prediction
+    input_df = pd.DataFrame([[
+        input_dict["exp_food"],
+        input_dict["exp_rent"],
+        input_dict["exp_Education"],
+        input_dict["exp_Water"],
+        input_dict["exp_Electricity"],
+        input_dict["Savings_or_Insurance_Payment"],
+        input_dict["Communication_Exp"],
+        input_dict["hhsize"],
+        input_dict["Area_Name"],
+        input_dict["Region_Name"]
+    ]], columns=[
+        "exp_food",
+        "exp_rent",
+        "exp_Education",
+        "exp_Water",
+        "exp_Electricity",
+        "Savings_or_Insurance_Payment",
+        "Communication_Exp",
+        "hhsize",
+        "Area_Name",
+        "Region_Name"
+    ])
+
+    # Make prediction
+    return model.predict(input_df)[0]
+
+@app.post("/predict", response_model=PredictionOutput)
 async def predict(
     request: Request,
     data: ExpenditureInput,
     user_id: str = Depends(verify_token)
 ):
     try:
-        # Extract bearer token from request
+        # Get authenticated Supabase client
         auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
         token = auth_header.split(" ")[1]
-
-        # Use token-aware client
         supabase_user = get_supabase_with_token(token)
 
-        print("Incoming data:", data.dict())
-        # Convert input to DataFrame
-        input_df = pd.DataFrame([data.dict()])
-
-        # Make prediction
-        pred = model.predict(input_df)[0]
+        # Convert input to dictionary
+        input_dict = data.dict()
+        print("Incoming data:", input_dict)
+        
+        # Use safe prediction function
+        pred = safe_predict_with_categoricals(model, input_dict)
         print("Raw model output:", pred)
         rounded_pred = float(round(pred, 2))
+        
+        # Calculate monthly equivalent
+        monthly_equivalent = round(rounded_pred / 12, 2)
 
         # Store prediction
         response = supabase_user.table("predictions").insert({
-            "input_data": data.dict(),
+            "input_data": input_dict,
             "predicted_exp": rounded_pred,
-            "model_used": "RF",
+            "model_used": "GradientBoosting",
             "user_id": user_id
         }).execute()
 
@@ -200,181 +252,85 @@ async def predict(
 
         return {
             "predicted_expenditure": rounded_pred,
-            "db_response": response.data
+            "monthly_equivalent": monthly_equivalent,
+            "input_data": input_dict
         }
 
     except Exception as e:
+        import traceback
+        print(f"Error details:\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction failed: {str(e)}"
         )
 
 
-@app.get("/predictions")
-async def get_user_predictions(
-    user_id: str = Depends(verify_token),
-    limit: Optional[int] = 10
-):
-    try:
-        response = supabase.table("predictions")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        return response.data
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch predictions: {str(e)}"
-        )
-
-
-@app.get("/profile")
-async def get_profile(request: Request,user_id: str = Depends(verify_token)):
-    try:
-        # 🔐 Get token from header
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Use user-authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-        response = supabase_user.table("profiles")\
-            .select("*")\
-            .eq("id", user_id)\
-            .single()\
-            .execute()
-
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Profile not found"
-            )
-
-        return response.data
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch profile: {str(e)}"
-        )
-        
-@app.get("/profile/{profile_id}")
-async def get_profile_by_id(
-    profile_id: str,
+@app.put("/predictions/{prediction_id}", response_model=PredictionOutput)
+async def update_prediction(
+    prediction_id: str,
     request: Request,
-    current_user_id: str = Depends(verify_token)
-):
-    try:
-        # 🔐 Get token from header
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Use user-authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-        
-        # First check if the requesting user has permission to view this profile
-        # (Add your specific authorization logic here)
-        # For example, you might want to restrict this to admin users only
-        # or users with specific relationships
-        
-        # For now, we'll just verify the profile exists and return it
-        response = supabase_user.table("profiles")\
-            .select("*")\
-            .eq("id", profile_id)\
-            .single()\
-            .execute()
-            
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Profile not found"
-            )
-            
-        return response.data
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch profile: {str(e)}"
-        )
-
-
-@app.put("/profile")
-async def update_profile(
-    profile_data: dict,
+    updated_data: ExpenditureInput,
     user_id: str = Depends(verify_token)
 ):
     try:
-        response = supabase.table("profiles")\
-            .update(profile_data)\
-            .eq("id", user_id)\
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Verify prediction exists
+        existing_pred = supabase_user.table("predictions") \
+            .select("*") \
+            .eq("id", prediction_id) \
+            .eq("user_id", user_id) \
+            .maybe_single() \
             .execute()
 
-        if response.error:
+        if not existing_pred.data:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to update profile"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Prediction not found or not owned by user"
+            )
+
+        # Prepare data for prediction
+        input_dict = updated_data.dict()
+        # Use safe prediction function
+        pred = safe_predict_with_categoricals(model, input_dict)
+        rounded_pred = float(round(pred, 2))
+        monthly_equivalent = round(rounded_pred / 12, 2)
+        print("Updated model output:", rounded_pred)
+
+        # Update the prediction
+        update_response = supabase_user.table("predictions") \
+            .update({
+                "input_data": input_dict,
+                "predicted_exp": rounded_pred,
+                "updated_at": "now()"
+            }) \
+            .eq("id", prediction_id) \
+            .execute()
+
+        if hasattr(update_response, 'error') and update_response.error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update prediction"
             )
 
         return {
-            "message": "Profile updated",
-            "data": response.data
+            "predicted_expenditure": rounded_pred,
+            "monthly_equivalent": monthly_equivalent,
+            "input_data": input_dict
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        logger.error(f"Error updating prediction: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Profile update failed: {str(e)}"
+            detail=f"Failed to update prediction: {str(e)}"
         )
-
-
-@app.get("/analytics/prediction-trend")
-async def prediction_trend(request: Request, user_id: str = Depends(verify_token), limit: int = 100):
-    try:
-        # 🔐 Get Bearer token from header
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing token")
-        token = auth_header.split(" ")[1]
-
-        # ✅ Use authenticated Supabase client
-        supabase_user = get_supabase_with_token(token)
-        print("supabase user: ", supabase_user)
-        print("👤 Authenticated user ID:", user_id)
-
-        response = supabase_user.table("predictions")\
-            .select("predicted_exp, created_at")\
-            .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        print("📊 Supabase raw response:", response)
-
-        if not response.data:
-            return []
-
-        trend_data = [
-            {
-                "date": row["created_at"][:10],  # e.g., "2025-06-30"
-                "predicted_exp": row["predicted_exp"]
-            }
-            for row in response.data if row["predicted_exp"] is not None
-        ]
-
-        return trend_data
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch prediction trend: {str(e)}"
-        )
-
 
 # Import the Api compare expenses and predictions
 @app.post("/compare", response_model=ComparisonResult)
@@ -383,7 +339,6 @@ async def compare_expenses(
     request: Request,
     user_id: str = Depends(verify_token)
 ):
-    
     try:
         # Get authenticated Supabase client
         auth_header = request.headers.get("authorization")
@@ -402,52 +357,42 @@ async def compare_expenses(
             raise HTTPException(status_code=404, detail="Prediction not found")
 
         prediction = prediction_res.data
-        
-        # Initialize date variables
-        start_date = None
-        end_date = None
 
-        # 2. Fetch selected expenses
-        if request_data.expenses.expense_ids:
-            # Compare specific selected expenses
-            expenses_res = supabase_user.table("expenses") \
-                .select("*") \
-                .in_("id", request_data.expenses.expense_ids) \
-                .eq("user_id", user_id) \
-                .execute()
-        else:
-            if not request_data.expenses.month or not request_data.expenses.year:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Must provide either expense_ids or month/year"
-                )
-            # Add debug print
-            print(f"Querying expenses between {start_date} and {end_date} for user {user_id}")
-            # start_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-01"
-            # end_date = (datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=31)).strftime("%Y-%m-%d")
-            
-            # Calculate exact date range for the month
-            _, last_day = monthrange(request_data.expenses.year, request_data.expenses.month)
-            start_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-01"
-            end_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-{last_day:02d}"
-            
-            expenses_res = supabase_user.table("expenses") \
-                .select("*") \
-                .eq("user_id", user_id) \
-                .gte("date", start_date) \
-                .lte("date", end_date) \
-                .execute()
+        # 2. Validate month/year selection
+        if not request_data.expenses.month or not request_data.expenses.year:
+            raise HTTPException(
+                status_code=422,
+                detail="Must provide both month and year for comparison"
+            )
+
+        # 3. Calculate date range for the month
+        _, last_day = monthrange(request_data.expenses.year, request_data.expenses.month)
+        start_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-01"
+        end_date = f"{request_data.expenses.year}-{request_data.expenses.month:02d}-{last_day:02d}"
+        
+        # 4. Fetch expenses for the selected month
+        expenses_res = supabase_user.table("expenses") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .gte("date", start_date) \
+            .lte("date", end_date) \
+            .execute()
 
         expenses = expenses_res.data
 
         if not expenses:
-            raise HTTPException(status_code=404, detail="No expenses found for comparison")
+            return ComparisonResult(
+                total_actual=0,
+                total_predicted_monthly=0,
+                variance_percentage=0,
+                message="No expenses found for selected month",
+                category_breakdown=[],
+                confidence_score=None,
+                time_period_note=f"No expenses in {month_name[request_data.expenses.month]} {request_data.expenses.year}",
+                is_recurring_adjusted=False
+            )
 
-        # 3. Normalize time periods and calculate totals
-        # Convert yearly prediction to monthly
-        monthly_prediction = prediction["predicted_exp"] / 12
-        
-        # Calculate actual monthly spending (handling recurring expenses)
+        # 5. Calculate actual monthly spending (with recurring adjustments)
         actual_monthly = 0
         category_totals = defaultdict(float)
         recurring_adjustments = False
@@ -462,66 +407,85 @@ async def compare_expenses(
                 if interval == "weekly":
                     amount *= 4.33  # Approximate weeks in a month
                 elif interval == "yearly":
-                    amount /= 12
+                    amount /= 12    # Convert yearly to monthly
             
             actual_monthly += amount
             category_totals[expense["category"]] += amount
 
-        # 4. Calculate variance
-        variance = ((actual_monthly - monthly_prediction) / monthly_prediction) * 100
+        # 6. Prepare predicted values
+        # Yearly total converted to monthly
+        monthly_predicted_total = prediction["predicted_exp"] / 12
         
-        # 5. Prepare category breakdown
+        # Predicted categories (already monthly values)
         predicted_categories = {
-            "Food": prediction["input_data"].get("Food_Expenditure", 0) / 12,
-            "Housing": prediction["input_data"].get("Housing_Expenditure", 0) / 12,
-            "Transport": prediction["input_data"].get("Transport_Expenditure", 0) / 12,
-            "Utilities": prediction["input_data"].get("Utilities_Expenditure", 0) / 12,
-            "Other": (prediction["input_data"].get("NonFood_Expenditure", 0) - 
-                     prediction["input_data"].get("Transport_Expenditure", 0) -
-                     prediction["input_data"].get("Utilities_Expenditure", 0)) / 12
+            "Food": prediction["input_data"].get("exp_food", 0),
+            "Housing": prediction["input_data"].get("exp_rent", 0),
+            "Education": prediction["input_data"].get("exp_Education", 0),
+            "Utilities": (prediction["input_data"].get("exp_Water", 0) + 
+                         prediction["input_data"].get("exp_Electricity", 0)),
+            "Communication": prediction["input_data"].get("Communication_Exp", 0),
+            "Savings": prediction["input_data"].get("Savings_or_Insurance_Payment", 0),
+            "Other": 0  # Will calculate remaining
         }
 
+        # Calculate "Other" category as remaining predicted amount
+        predicted_sum = sum(predicted_categories.values())
+        predicted_categories["Other"] = max(0, monthly_predicted_total - predicted_sum)
+
+        # 7. Prepare category breakdown
         category_comparisons = []
-        for category, actual in category_totals.items():
+        all_categories = set(category_totals.keys()).union(set(predicted_categories.keys()))
+        
+        for category in all_categories:
+            actual = category_totals.get(category, 0)
             predicted = predicted_categories.get(category, 0)
             diff = actual - predicted
             percentage_diff = (diff / predicted) * 100 if predicted != 0 else 0
-            category_comparisons.append({
-                "category": category,
-                "actual": round(actual, 2),
-                "predicted": round(predicted, 2),
-                "difference": round(diff, 2),
-                "percentage_diff": round(percentage_diff, 2)
-            })
+            
+            category_comparisons.append(CategoryComparison(
+                category=category,
+                actual=round(actual, 2),
+                predicted=round(predicted, 2),
+                difference=round(diff, 2),
+                percentage_diff=round(percentage_diff, 2)
+            ))
 
-        # 6. Determine comparison message
-        if abs(variance) < 10:
-            message = "Your spending aligns closely with predictions"
-        elif variance > 0:
-            message = f"You're spending {abs(variance):.1f}% more than predicted"
+        # Sort categories by absolute difference (most significant first)
+        category_comparisons.sort(key=lambda x: abs(x.difference), reverse=True)
+
+        # 8. Calculate overall variance
+        if monthly_predicted_total == 0:
+            variance_pct = 0
+            message = "No predicted amount available for comparison"
         else:
-            message = f"You're spending {abs(variance):.1f}% less than predicted"
+            variance_pct = ((actual_monthly - monthly_predicted_total) / monthly_predicted_total) * 100
+            if abs(variance_pct) < 10:
+                message = "Your spending aligns closely with predictions"
+            elif variance_pct > 0:
+                message = f"You're spending {abs(variance_pct):.1f}% more than predicted"
+            else:
+                message = f"You're spending {abs(variance_pct):.1f}% less than predicted"
 
-        # 7. Return comparison result
-        return {
-            "total_actual": round(actual_monthly, 2),
-            "total_predicted_monthly": round(monthly_prediction, 2),
-            "variance_percentage": round(variance, 2),
-            "message": message,
-            "category_breakdown": category_comparisons,
-            "confidence_score": 75,  # Could come from model metadata
-            "time_period_note": "Yearly prediction converted to monthly equivalent",
-            "is_recurring_adjusted": recurring_adjustments
-        }
+        # 9. Return comparison result
+        return ComparisonResult(
+            total_actual=round(actual_monthly, 2),
+            total_predicted_monthly=round(monthly_predicted_total, 2),
+            variance_percentage=round(variance_pct, 2),
+            message=message,
+            category_breakdown=category_comparisons,
+            confidence_score=75,
+            time_period_note=f"Comparing {month_name[request_data.expenses.month]} {request_data.expenses.year} expenses with predicted monthly amounts",
+            is_recurring_adjusted=recurring_adjustments
+        )
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Comparison failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Comparison failed: {str(e)}"
         )
-
 # Analytics endpoints
 # analytics/expense-overview
 @app.get("/analytics/expense-overview", response_model=ExpenseOverviewResponse)
@@ -1175,4 +1139,121 @@ async def get_prediction_trends(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get prediction trends: {str(e)}"
+        )
+        
+        
+@app.post("/compare-predictions", response_model=PredictionComparisonResult)
+async def compare_predictions(
+    request_data: PredictionComparisonRequest,
+    request: Request,
+    user_id: str = Depends(verify_token)
+):
+    """Compare two predictions by ID, showing differences in totals and by category"""
+    try:
+        # Get authenticated Supabase client
+        auth_header = request.headers.get("authorization")
+        token = auth_header.split(" ")[1]
+        supabase_user = get_supabase_with_token(token)
+
+        # Fetch both predictions
+        pred1_res = supabase_user.table("predictions") \
+            .select("*") \
+            .eq("id", request_data.prediction1_id) \
+            .eq("user_id", user_id) \
+            .single() \
+            .execute()
+        
+        pred2_res = supabase_user.table("predictions") \
+            .select("*") \
+            .eq("id", request_data.prediction2_id) \
+            .eq("user_id", user_id) \
+            .single() \
+            .execute()
+
+        if not pred1_res.data or not pred2_res.data:
+            raise HTTPException(status_code=404, detail="One or both predictions not found")
+
+        pred1 = pred1_res.data
+        pred2 = pred2_res.data
+
+        # Calculate time difference between predictions
+        created_at_diff = None
+        try:
+            date1 = datetime.fromisoformat(pred1["created_at"])
+            date2 = datetime.fromisoformat(pred2["created_at"])
+            delta = abs(date2 - date1)
+            
+            if delta.days > 365:
+                created_at_diff = f"{delta.days//365} years apart"
+            elif delta.days > 30:
+                created_at_diff = f"{delta.days//30} months apart"
+            elif delta.days > 0:
+                created_at_diff = f"{delta.days} days apart"
+            elif delta.seconds > 3600:
+                created_at_diff = f"{delta.seconds//3600} hours apart"
+            else:
+                created_at_diff = "created at similar times"
+        except:
+            pass  # Don't fail if date parsing fails
+
+        # Calculate totals and differences
+        pred1_total = pred1["predicted_exp"]
+        pred2_total = pred2["predicted_exp"]
+        abs_diff = pred2_total - pred1_total
+        pct_diff = (abs_diff / pred1_total) * 100 if pred1_total != 0 else 0
+
+        # Prepare category breakdown
+        category_comparisons = []
+        common_categories = {
+            "Food": ("exp_food", "exp_food"),
+            "Housing": ("exp_rent", "exp_rent"),
+            "Education": ("exp_Education", "exp_Education"),
+            "Utilities": (["exp_Water", "exp_Electricity"], ["exp_Water", "exp_Electricity"]),
+            "Communication": ("Communication_Exp", "Communication_Exp"),
+            "Savings": ("Savings_or_Insurance_Payment", "Savings_or_Insurance_Payment")
+        }
+
+        for category, (fields1, fields2) in common_categories.items():
+            # Handle multi-field categories (like Utilities)
+            def get_amount(pred, fields):
+                if isinstance(fields, list):
+                    return sum(pred["input_data"].get(f, 0) for f in fields)
+                return pred["input_data"].get(fields, 0)
+
+            amount1 = get_amount(pred1, fields1)
+            amount2 = get_amount(pred2, fields2)
+            diff = amount2 - amount1
+            pct = (diff / amount1) * 100 if amount1 != 0 else 0
+
+            category_comparisons.append(CategoryComparison(
+                category=category,
+                actual=round(amount2, 2),
+                predicted=round(amount1, 2),
+                difference=round(diff, 2),
+                percentage_diff=round(pct, 2)
+            ))
+
+        # Generate comparison message
+        if abs_diff > 0:
+            message = f"Second prediction is {abs(pct_diff):.1f}% higher than the first"
+        else:
+            message = f"Second prediction is {abs(pct_diff):.1f}% lower than the first"
+
+        return PredictionComparisonResult(
+            prediction1_total=round(pred1_total, 2),
+            prediction2_total=round(pred2_total, 2),
+            absolute_difference=round(abs_diff, 2),
+            percentage_difference=round(pct_diff, 2),
+            category_breakdown=category_comparisons,
+            comparison_message=message,
+            created_at_difference=created_at_diff
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Prediction comparison failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction comparison failed: {str(e)}"
         )
