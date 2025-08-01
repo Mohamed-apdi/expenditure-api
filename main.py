@@ -85,77 +85,99 @@ async def health_check():
 
 @app.post("/auth/request-otp")
 async def request_otp(background_tasks: BackgroundTasks, email: str):
-    # Check if email already registered
-    user_check = supabase.table("auth.users")\
-        .select("email")\
-        .eq("email", email)\
-        .maybe_single()\
-        .execute()
-    
-    if user_check.data:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    try:
+        # Validate email format
+        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+            raise HTTPException(status_code=400, detail="Invalid email format")
 
-    background_tasks.add_task(save_and_send_otp, email)
-    return {"message": "OTP sent to email"}
+        # Check if email already registered
+        user_check = supabase.table("auth.users")\
+            .select("email")\
+            .eq("email", email)\
+            .maybe_single()\
+            .execute()
+        
+        if user_check.data:
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        background_tasks.add_task(save_and_send_otp, email)
+        return {"message": "OTP sent to email"}
+    except Exception as e:
+        logger.error(f"OTP request error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
 
 @app.post("/auth/verify-otp")
 async def verify_otp(email: str, otp: str):
-    result = supabase.table("email_otp_verification")\
-        .select("*")\
-        .eq("email", email)\
-        .eq("otp", otp)\
-        .eq("verified", False)\
-        .maybe_single()\
-        .execute()
+    try:
+        # Basic validation
+        if not email or not otp or len(otp) != 6:
+            raise HTTPException(status_code=400, detail="Invalid input")
 
-    if not result.data:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+        result = supabase.table("email_otp_verification")\
+            .select("*")\
+            .eq("email", email)\
+            .eq("otp", otp)\
+            .eq("verified", False)\
+            .maybe_single()\
+            .execute()
 
-    expires_at = datetime.fromisoformat(result.data["expires_at"])
-    if datetime.utcnow() > expires_at:
-        raise HTTPException(status_code=400, detail="OTP expired")
+        if not result.data:
+            raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # Mark as verified
-    supabase.table("email_otp_verification")\
-        .update({"verified": True})\
-        .eq("id", result.data["id"])\
-        .execute()
+        expires_at = datetime.fromisoformat(result.data["expires_at"])
+        if datetime.utcnow() > expires_at:
+            raise HTTPException(status_code=400, detail="OTP expired")
 
-    return {"message": "Email verified successfully"}
+        # Mark as verified
+        supabase.table("email_otp_verification")\
+            .update({"verified": True})\
+            .eq("id", result.data["id"])\
+            .execute()
+
+        return {"message": "Email verified successfully", "verified": True}
+    except Exception as e:
+        logger.error(f"OTP verification error: {str(e)}")
+        raise HTTPException(status_code=500, detail="OTP verification failed")
 
 @app.post("/auth/signup-with-verified-email")
-async def signup_with_verified_email(
-    email: str,
-    password: str,
-    full_name: str
-):
-    # Check if email was verified
-    verification = supabase.table("email_otp_verification")\
-        .select("*")\
-        .eq("email", email)\
-        .eq("verified", True)\
-        .maybe_single()\
-        .execute()
+async def signup_with_verified_email(user_data: UserSignup):
+    try:
+        # Check if email was verified
+        verification = supabase.table("email_otp_verification")\
+            .select("*")\
+            .eq("email", user_data.email)\
+            .eq("verified", True)\
+            .maybe_single()\
+            .execute()
 
-    if not verification.data:
-        raise HTTPException(status_code=400, detail="Email not verified")
+        if not verification.data:
+            raise HTTPException(status_code=400, detail="Email not verified")
 
-    # Create the user
-    auth_response = supabase.auth.sign_up({
-        "email": email,
-        "password": password,
-        "options": {
-            "data": {
-                "full_name": full_name,
-                "email_verified": True
+        # Create the user
+        auth_response = supabase.auth.sign_up({
+            "email": user_data.email,
+            "password": user_data.password,
+            "options": {
+                "data": {
+                    "full_name": user_data.full_name,
+                    "email_verified": True  # Mark as verified
+                }
             }
-        }
-    })
+        })
 
-    if auth_response.error:
-        raise HTTPException(status_code=400, detail=auth_response.error.message)
+        if auth_response.error:
+            raise HTTPException(status_code=400, detail=auth_response.error.message)
 
-    return {"message": "Account created successfully"}
+        # Clean up OTP record
+        supabase.table("email_otp_verification")\
+            .delete()\
+            .eq("email", user_data.email)\
+            .execute()
+
+        return {"message": "Account created successfully"}
+    except Exception as e:
+        logger.error(f"Signup error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Account creation failed")
 
 
 # Safely handles prediction with early return for empty/zero inputs
