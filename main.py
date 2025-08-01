@@ -33,7 +33,6 @@ class UserSignup(BaseModel):
     password: str
     full_name: str
 
-
 class UserLogin(BaseModel):
     email: str
     password: str
@@ -79,7 +78,7 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load model: {str(e)}")
 
-
+# home page
 @app.get("/")
 async def health_check():
     return {"status": "healthy", "message": "Household Expenditure Predictor API"}
