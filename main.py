@@ -8,6 +8,7 @@ from schemes.compare import ComparisonRequest, ComparisonResult, CategoryCompari
 from schemes.analytics import ExpenseOverviewResponse, ExpenseCategoriesResponse, ExpenseTrendsResponse, Granularity, TrendDataPoint, PredictionSummary, PredictionOverviewResponse, InputCategoryItem, PredictionCategoriesResponse, PredictionTrendItem, PredictionTrendsResponse
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
+from auth.send_otp import generate_otp, send_otp_email, save_otp 
 import joblib
 import numpy as np
 import pandas as pd
@@ -88,47 +89,6 @@ async def health_check():
     return {"status": "healthy", "message": "Household Expenditure Predictor API"}
 
 
-# OTP Functions
-def generate_otp() -> str:
-    return str(random.randint(100000, 999999))
-
-def send_otp_email(email: str, otp: str):
-    """Send OTP email using SMTP"""
-    sender_email = os.getenv("SMTP_EMAIL")
-    sender_password = os.getenv("SMTP_PASSWORD")
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", 587))
-    
-    message = MIMEMultipart()
-    message["From"] = sender_email
-    message["To"] = email
-    message["Subject"] = "Your Verification Code"
-    
-    html = f"""
-    <html>
-      <body>
-        <h2>Your OTP Code</h2>
-        <p>Your verification code is: <strong>{otp}</strong></p>
-        <p>This code expires in 10 minutes.</p>
-      </body>
-    </html>
-    """
-    
-    message.attach(MIMEText(html, "html"))
-    
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, email, message.as_string())
-
-def save_otp(email: str, otp: str):
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
-    supabase.table("email_otp_verification").insert({
-        "email": email,
-        "otp": otp,
-        "expires_at": expires_at.isoformat(),
-        "verified": False
-    }).execute()
 
 # Models
 class SignupRequest(BaseModel):
