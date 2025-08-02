@@ -32,17 +32,6 @@ load_dotenv()
 app = FastAPI()
 # Add this with your other Pydantic models
 
-
-class UserSignup(BaseModel):
-    email: str
-    password: str
-    full_name: str
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
-
-
 # CORS Configuration (Essential for React Native)
 app.add_middleware(
     CORSMiddleware,
@@ -119,8 +108,18 @@ async def request_signup_otp(request: OtpRequest, background_tasks: BackgroundTa
 
         # Generate and send OTP
         otp = generate_otp()
+        
+        # Save OTP first (not in background)
+        try:
+            save_otp(request.email, otp)
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"Failed to generate OTP: {str(e)}"}
+            )
+        
+        # Then send email in background
         background_tasks.add_task(send_otp_email, request.email, otp)
-        background_tasks.add_task(save_otp, request.email, otp)
         
         return JSONResponse({
             "success": True,
