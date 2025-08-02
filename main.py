@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter, BackgroundTasks
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from collections import defaultdict
 from fastapi.middleware.cors import CORSMiddleware
 from auth.verify_token import verify_token
@@ -8,24 +8,14 @@ from schemes.compare import ComparisonRequest, ComparisonResult, CategoryCompari
 from schemes.analytics import ExpenseOverviewResponse, ExpenseCategoriesResponse, ExpenseTrendsResponse, Granularity, TrendDataPoint, PredictionSummary, PredictionOverviewResponse, InputCategoryItem, PredictionCategoriesResponse, PredictionTrendItem, PredictionTrendsResponse
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
-from auth.send_otp import generate_otp, send_otp_email, save_otp 
 import joblib
 import numpy as np
 import pandas as pd
 import os
-from typing import Optional
 from dotenv import load_dotenv
-from pydantic import BaseModel
-import re
 import logging
 import time
 from calendar import monthrange, month_name
-from fastapi import BackgroundTasks
-import random
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from fastapi.responses import JSONResponse
 # Load environment variables
 load_dotenv()
 
@@ -76,119 +66,6 @@ except Exception as e:
 @app.get("/")
 async def health_check():
     return {"status": "healthy", "message": "Household Expenditure Predictor API"}
-
-
-
-# Models
-class SignupRequest(BaseModel):
-    email: str
-    password: str
-    full_name: str
-    otp: str
-
-class OtpRequest(BaseModel):
-    email: str
-
-# Endpoints
-@app.post("/auth/request-signup-otp")
-async def request_signup_otp(request: OtpRequest, background_tasks: BackgroundTasks):
-    try:
-        # Check if email already exists
-        user_check = supabase.table("auth.users")\
-            .select("email")\
-            .eq("email", request.email)\
-            .maybe_single()\
-            .execute()
-        
-        if user_check.data:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Email already registered"}
-            )
-
-        # Generate and send OTP
-        otp = generate_otp()
-        
-        # Save OTP first (not in background)
-        try:
-            save_otp(request.email, otp)
-        except Exception as e:
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "message": f"Failed to generate OTP: {str(e)}"}
-            )
-        
-        # Then send email in background
-        background_tasks.add_task(send_otp_email, request.email, otp)
-        
-        return JSONResponse({
-            "success": True,
-            "message": "OTP sent to email"
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Error sending OTP: {str(e)}"}
-        )
-
-@app.post("/auth/verify-and-signup")
-async def verify_and_signup(request: SignupRequest):
-    try:
-        # Verify OTP first
-        result = supabase.table("email_otp_verification")\
-            .select("*")\
-            .eq("email", request.email)\
-            .eq("otp", request.otp)\
-            .eq("verified", False)\
-            .maybe_single()\
-            .execute()
-
-        if not result.data:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Invalid or expired OTP"}
-            )
-
-        expires_at = datetime.fromisoformat(result.data["expires_at"])
-        if datetime.utcnow() > expires_at:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "OTP expired"}
-            )
-
-        # Mark OTP as verified
-        supabase.table("email_otp_verification")\
-            .update({"verified": True})\
-            .eq("id", result.data["id"])\
-            .execute()
-
-        # Create user with Supabase Auth
-        auth_response = supabase.auth.sign_up({
-            "email": request.email,
-            "password": request.password,
-            "options": {
-                "data": {
-                    "full_name": request.full_name,
-                    "email_verified": True
-                }
-            }
-        })
-
-        if auth_response.error:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": auth_response.error.message}
-            )
-
-        return JSONResponse({
-            "success": True,
-            "message": "Account created successfully"
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Account creation failed: {str(e)}"}
-        )
 
 
 # Safely handles prediction with early return for empty/zero inputs
