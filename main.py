@@ -24,6 +24,7 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from fastapi.responses import JSONResponse
 # Load environment variables
 load_dotenv()
 
@@ -142,63 +143,93 @@ class OtpRequest(BaseModel):
 # Endpoints
 @app.post("/auth/request-signup-otp")
 async def request_signup_otp(request: OtpRequest, background_tasks: BackgroundTasks):
-    # Check if email already exists
-    user_check = supabase.table("auth.users")\
-        .select("email")\
-        .eq("email", request.email)\
-        .maybe_single()\
-        .execute()
-    
-    if user_check.data:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    try:
+        # Check if email already exists
+        user_check = supabase.table("auth.users")\
+            .select("email")\
+            .eq("email", request.email)\
+            .maybe_single()\
+            .execute()
+        
+        if user_check.data:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Email already registered"}
+            )
 
-    # Generate and send OTP
-    otp = generate_otp()
-    background_tasks.add_task(send_otp_email, request.email, otp)
-    background_tasks.add_task(save_otp, request.email, otp)
-    
-    return {"message": "OTP sent to email"}
+        # Generate and send OTP
+        otp = generate_otp()
+        background_tasks.add_task(send_otp_email, request.email, otp)
+        background_tasks.add_task(save_otp, request.email, otp)
+        
+        return JSONResponse({
+            "success": True,
+            "message": "OTP sent to email"
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Error sending OTP: {str(e)}"}
+        )
 
 @app.post("/auth/verify-and-signup")
 async def verify_and_signup(request: SignupRequest):
-    # Verify OTP first
-    result = supabase.table("email_otp_verification")\
-        .select("*")\
-        .eq("email", request.email)\
-        .eq("otp", request.otp)\
-        .eq("verified", False)\
-        .maybe_single()\
-        .execute()
+    try:
+        # Verify OTP first
+        result = supabase.table("email_otp_verification")\
+            .select("*")\
+            .eq("email", request.email)\
+            .eq("otp", request.otp)\
+            .eq("verified", False)\
+            .maybe_single()\
+            .execute()
 
-    if not result.data:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+        if not result.data:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Invalid or expired OTP"}
+            )
 
-    expires_at = datetime.fromisoformat(result.data["expires_at"])
-    if datetime.utcnow() > expires_at:
-        raise HTTPException(status_code=400, detail="OTP expired")
+        expires_at = datetime.fromisoformat(result.data["expires_at"])
+        if datetime.utcnow() > expires_at:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "OTP expired"}
+            )
 
-    # Mark OTP as verified
-    supabase.table("email_otp_verification")\
-        .update({"verified": True})\
-        .eq("id", result.data["id"])\
-        .execute()
+        # Mark OTP as verified
+        supabase.table("email_otp_verification")\
+            .update({"verified": True})\
+            .eq("id", result.data["id"])\
+            .execute()
 
-    # Create user with Supabase Auth
-    auth_response = supabase.auth.sign_up({
-        "email": request.email,
-        "password": request.password,
-        "options": {
-            "data": {
-                "full_name": request.full_name,
-                "email_verified": True  # Mark as verified since we verified via OTP
+        # Create user with Supabase Auth
+        auth_response = supabase.auth.sign_up({
+            "email": request.email,
+            "password": request.password,
+            "options": {
+                "data": {
+                    "full_name": request.full_name,
+                    "email_verified": True
+                }
             }
-        }
-    })
+        })
 
-    if auth_response.error:
-        raise HTTPException(status_code=400, detail=auth_response.error.message)
+        if auth_response.error:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": auth_response.error.message}
+            )
 
-    return {"message": "Account created successfully"}
+        return JSONResponse({
+            "success": True,
+            "message": "Account created successfully"
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Account creation failed: {str(e)}"}
+        )
 
 
 # Safely handles prediction with early return for empty/zero inputs
