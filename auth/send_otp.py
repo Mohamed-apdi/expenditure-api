@@ -47,12 +47,12 @@ def send_otp_email(email: str, otp: str):
 def save_otp(email: str, otp: str):
     expires_at = datetime.utcnow() + timedelta(minutes=10)
     response = supabase.table("email_otp_verification").insert({
-    "email": email,
-    "otp": otp,
-    "expires_at": expires_at.isoformat(),
-    "verified": False
-    }).execute()
-    print("Insert OTP response:", response)
-    if response.status_code not in [200, 201, 204]:
-        raise Exception(f"Insert failed: {response}")
+        "email": email,
+        "otp": otp,
+        "expires_at": expires_at.isoformat(),
+        "verified": False
+    }).select("*").execute()  # ← Add .select("*")
 
+    print("Insert OTP response:", response)
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Insert failed: {response}")
