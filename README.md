@@ -59,20 +59,22 @@ A comprehensive FastAPI-based backend for the Household Expenditure App, providi
 
 ## 🚀 Running the API
 
-### Option 1: Using the startup script (Recommended)
+### Option 1: Using the startup script (Recommended for development)
 ```bash
 python start_api.py
 ```
 
-### Option 2: Using uvicorn directly
+### Option 2: Using uvicorn directly (Same as deployment)
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Option 3: Using the main file
 ```bash
 python main.py
 ```
+
+**Note**: The startup script uses the same uvicorn command structure as your deployment environment for consistency.
 
 ## 📚 API Documentation
 

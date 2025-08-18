@@ -53,6 +53,13 @@ logger = logging.getLogger(__name__)
 async def startup_event():
     """Application startup event"""
     logger.info("🚀 Household Expenditure API starting up...")
+    
+    # Check if Supabase client is available
+    if supabase is None:
+        logger.error("❌ Supabase client not initialized")
+        logger.error("Please check your SUPABASE_URL and SUPABASE_KEY configuration")
+        return
+    
     try:
         # Test Supabase connection
         response = supabase.table('expenses').select('count', count='exact').limit(1).execute()
@@ -106,6 +113,9 @@ async def get_transaction_reports(
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive transaction reports"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Fetch transactions from Supabase
         response = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date).execute()
@@ -178,6 +188,9 @@ async def get_account_reports(
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive account reports"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Fetch accounts from Supabase
         response = supabase.table('accounts').select('*').eq('user_id', user_id).execute()
@@ -215,6 +228,9 @@ async def get_budget_reports(
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive budget reports"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Fetch budgets from Supabase
         response = supabase.table('budgets').select('*').eq('user_id', user_id).execute()
@@ -265,6 +281,9 @@ async def get_subscription_reports(
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive subscription reports"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Fetch subscriptions from Supabase
         response = supabase.table('subscriptions').select('*').eq('user_id', user_id).execute()
@@ -303,6 +322,9 @@ async def get_goal_reports(
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive goal reports"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Fetch goals from Supabase
         response = supabase.table('goals').select('*').eq('user_id', user_id).execute()
@@ -343,6 +365,9 @@ async def download_report(
     user_id: str = Depends(verify_token)
 ):
     """Download reports in CSV or PDF format"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+    
     try:
         # Get report data based on type
         if report_type == "transactions":

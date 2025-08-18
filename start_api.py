@@ -23,7 +23,7 @@ if __name__ == "__main__":
     print(f"🔍 Health Check: http://{host}:{port}/")
     print("=" * 50)
     
-    # Start the server
+    # Start the server using the same command structure as deployment
     uvicorn.run(
         "main:app",
         host=host,
