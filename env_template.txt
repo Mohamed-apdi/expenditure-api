@@ -1,0 +1,16 @@
+# Copy this file to .env and fill in your actual values
+
+# Supabase Configuration
+# Get these from your Supabase project dashboard → Settings → API
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your-anon-key-here
+
+# API Configuration
+API_HOST=0.0.0.0
+API_PORT=8000
+
+# Logging
+LOG_LEVEL=INFO
+
+# CORS (comma-separated for multiple origins)
+CORS_ORIGINS=*

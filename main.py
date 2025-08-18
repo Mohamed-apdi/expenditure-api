@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from auth.verify_token import verify_token
 from supabase_config.client import supabase
 from supabase_config.auth_client import get_supabase_with_token
-from dotenv import load_dotenv
+from config import config
 import logging
 import time
 import csv
@@ -18,16 +18,25 @@ from schemes.analytics import *
 from schemes.expenditure import *
 from schemes.compare import *
 
-# Load environment variables
-load_dotenv()
+# Validate configuration
+try:
+    config.validate()
+    config.print_config()
+except ValueError as e:
+    print(f"❌ Configuration Error: {e}")
+    print("Please check your .env file and ensure SUPABASE_URL and SUPABASE_KEY are set.")
+    exit(1)
 
-app = FastAPI()
-# Add this with your other Pydantic models
+app = FastAPI(
+    title="Household Expenditure API",
+    description="Comprehensive financial management and reporting API",
+    version="1.0.0"
+)
 
 # CORS Configuration (Essential for React Native)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,10 +44,22 @@ app.add_middleware(
 
 # Configure logging at module level
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.LOG_LEVEL.upper()),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup_event():
+    """Application startup event"""
+    logger.info("🚀 Household Expenditure API starting up...")
+    try:
+        # Test Supabase connection
+        response = supabase.table('expenses').select('count', count='exact').limit(1).execute()
+        logger.info("✅ Supabase connection successful")
+    except Exception as e:
+        logger.error(f"❌ Supabase connection failed: {e}")
+        logger.error("Please check your SUPABASE_URL and SUPABASE_KEY configuration")
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
@@ -57,10 +78,25 @@ async def add_process_time_header(request: Request, call_next):
     )
     return response
 
-# home page
+# Health check endpoint
 @app.get("/")
 async def health_check():
-    return {"status": "healthy", "message": "Household Expenditure Predictor API"}
+    return {
+        "status": "healthy", 
+        "message": "Household Expenditure API",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat()
+    }
+
+# Test endpoint for development
+@app.get("/test")
+async def test_endpoint():
+    """Test endpoint to verify API functionality"""
+    return {
+        "message": "API is working!",
+        "timestamp": datetime.now().isoformat(),
+        "supabase_configured": bool(config.SUPABASE_URL and config.SUPABASE_KEY)
+    }
 
 # Report endpoints
 @app.get("/reports/transactions")
@@ -72,7 +108,7 @@ async def get_transaction_reports(
     """Get comprehensive transaction reports"""
     try:
         # Fetch transactions from Supabase
-        response = await supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date).execute()
+        response = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date).execute()
         
         transactions = response.data
         
@@ -144,7 +180,7 @@ async def get_account_reports(
     """Get comprehensive account reports"""
     try:
         # Fetch accounts from Supabase
-        response = await supabase.table('accounts').select('*').eq('user_id', user_id).execute()
+        response = supabase.table('accounts').select('*').eq('user_id', user_id).execute()
         accounts = response.data
         
         # Calculate account statistics
@@ -181,12 +217,12 @@ async def get_budget_reports(
     """Get comprehensive budget reports"""
     try:
         # Fetch budgets from Supabase
-        response = await supabase.table('budgets').select('*').eq('user_id', user_id).execute()
+        response = supabase.table('budgets').select('*').eq('user_id', user_id).execute()
         budgets = response.data
         
         # Fetch expenses for budget comparison
         current_month = datetime.now().strftime('%Y-%m')
-        expenses_response = await supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', f"{current_month}-01").lte('date', f"{current_month}-31").execute()
+        expenses_response = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', f"{current_month}-01").lte('date', f"{current_month}-31").execute()
         expenses = expenses_response.data
         
         # Calculate budget vs actual
@@ -231,7 +267,7 @@ async def get_subscription_reports(
     """Get comprehensive subscription reports"""
     try:
         # Fetch subscriptions from Supabase
-        response = await supabase.table('subscriptions').select('*').eq('user_id', user_id).execute()
+        response = supabase.table('subscriptions').select('*').eq('user_id', user_id).execute()
         subscriptions = response.data
         
         # Calculate subscription statistics
@@ -269,7 +305,7 @@ async def get_goal_reports(
     """Get comprehensive goal reports"""
     try:
         # Fetch goals from Supabase
-        response = await supabase.table('goals').select('*').eq('user_id', user_id).execute()
+        response = supabase.table('goals').select('*').eq('user_id', user_id).execute()
         goals = response.data
         
         # Calculate goal statistics
