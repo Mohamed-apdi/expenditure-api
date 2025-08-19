@@ -290,7 +290,7 @@ async def get_subscription_reports(
         subscriptions = response.data
         
         # Calculate subscription statistics
-        total_monthly_cost = sum(sub['monthly_cost'] for sub in subscriptions)
+        total_monthly_cost = sum(sub['amount'] for sub in subscriptions)
         total_yearly_cost = total_monthly_cost * 12
         
         subscription_types = defaultdict(list)
@@ -307,7 +307,7 @@ async def get_subscription_reports(
             "by_category": {
                 category: {
                     "count": len(subs_list),
-                    "total_monthly_cost": sum(sub['monthly_cost'] for sub in subs_list),
+                    "total_monthly_cost": sum(sub['amount'] for sub in subs_list),
                     "subscriptions": subs_list
                 }
                 for category, subs_list in subscription_types.items()
@@ -335,9 +335,9 @@ async def get_goal_reports(
         total_saved = sum(goal['current_amount'] for goal in goals)
         total_progress = (total_saved / total_target * 100) if total_target > 0 else 0
         
-        # Categorize goals by status
-        active_goals = [goal for goal in goals if goal['status'] == 'active']
-        completed_goals = [goal for goal in goals if goal['status'] == 'completed']
+        # Categorize goals by status (using is_active field)
+        active_goals = [goal for goal in goals if goal['is_active'] == True]
+        completed_goals = [goal for goal in goals if goal['current_amount'] >= goal['target_amount']]
         
         return {
             "summary": {
@@ -426,9 +426,9 @@ async def download_report(
                     writer.writerow([
                         subscription['name'],
                         subscription['category'],
-                        subscription['monthly_cost'],
+                        subscription['amount'],
                         subscription['billing_cycle'],
-                        subscription.get('next_billing_date', 'N/A')
+                        subscription.get('next_payment_date', 'N/A')
                     ])
             elif report_type == "goals":
                 writer.writerow(['Name', 'Target Amount', 'Current Amount', 'Progress', 'Status', 'Deadline'])
@@ -439,8 +439,8 @@ async def download_report(
                         goal['target_amount'],
                         goal['current_amount'],
                         f"{progress:.2f}%",
-                        goal['status'],
-                        goal.get('deadline', 'N/A')
+                        'Active' if goal['is_active'] else 'Inactive',
+                        goal.get('target_date', 'N/A')
                     ])
             
             csv_content = output.getvalue()
