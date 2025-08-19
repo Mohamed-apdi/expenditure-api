@@ -168,6 +168,17 @@ async def get_transaction_reports(
         total_transactions = len(transactions)
         avg_transaction = total_amount / total_transactions if total_transactions > 0 else 0
         
+        # Create category breakdown object in the format frontend expects
+        category_breakdown_obj = {}
+        total_category_amount = sum(category_breakdown.values())
+        
+        for category, amount in category_breakdown.items():
+            category_breakdown_obj[category] = {
+                "amount": amount,
+                "percentage": (amount / total_category_amount * 100) if total_category_amount > 0 else 0,
+                "count": sum(1 for t in transactions if t['category'] == category)
+            }
+        
         return {
             "summary": {
                 "total_amount": total_amount,
@@ -177,14 +188,7 @@ async def get_transaction_reports(
                 "average_transaction": avg_transaction,
                 "period": f"{start_date} to {end_date}"
             },
-            "category_breakdown": [
-                {
-                    "category": category,
-                    "amount": amount,
-                    "percentage": (amount / sum(category_breakdown.values()) * 100) if sum(category_breakdown.values()) > 0 else 0
-                }
-                for category, amount in category_breakdown.items()
-            ],
+            "category_breakdown": category_breakdown_obj,
             "daily_trends": [
                 {
                     "date": date,
