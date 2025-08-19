@@ -110,6 +110,7 @@ async def test_endpoint():
 async def get_transaction_reports(
     start_date: str,
     end_date: str,
+    account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive transaction reports"""
@@ -117,8 +118,14 @@ async def get_transaction_reports(
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
     
     try:
-        # Fetch transactions from Supabase
-        response = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date).execute()
+        # Fetch transactions from Supabase with optional account filtering
+        query = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date)
+        
+        # Add account filter if account_id is provided
+        if account_id:
+            query = query.eq('account_id', account_id)
+            
+        response = query.execute()
         
         transactions = response.data
         
@@ -362,6 +369,7 @@ async def download_report(
     format: str = "csv",  # csv or pdf
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
     """Download reports in CSV or PDF format"""
@@ -373,7 +381,7 @@ async def download_report(
         if report_type == "transactions":
             if not start_date or not end_date:
                 raise HTTPException(status_code=400, detail="Start date and end date required for transaction reports")
-            data = await get_transaction_reports(start_date, end_date, user_id)
+            data = await get_transaction_reports(start_date, end_date, account_id, user_id)
         elif report_type == "accounts":
             data = await get_account_reports(user_id)
         elif report_type == "budget":
