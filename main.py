@@ -134,30 +134,45 @@ async def get_transaction_reports(
         daily_trends = defaultdict(float)
         monthly_trends = defaultdict(float)
         
+        total_income = 0
+        total_expenses = 0
+        
         for transaction in transactions:
-            amount = abs(transaction['amount'])
+            amount = transaction['amount']
             category = transaction['category']
+            entry_type = transaction.get('entry_type', 'Expense')
             date = datetime.fromisoformat(transaction['date'].replace('Z', '+00:00'))
             
+            # Use absolute amount for category breakdown and trends
+            abs_amount = abs(amount)
+            
             # Category breakdown
-            category_breakdown[category] += amount
+            category_breakdown[category] += abs_amount
             
             # Daily trends
             daily_key = date.strftime('%Y-%m-%d')
-            daily_trends[daily_key] += amount
+            daily_trends[daily_key] += abs_amount
             
             # Monthly trends
             monthly_key = date.strftime('%Y-%m')
-            monthly_trends[monthly_key] += amount
+            monthly_trends[monthly_key] += abs_amount
+            
+            # Calculate totals based on entry type
+            if entry_type == 'Income':
+                total_income += abs_amount
+            else:  # Expense
+                total_expenses += abs_amount
         
-        # Calculate statistics
-        total_amount = sum(category_breakdown.values())
+        # Calculate statistics - net amount (income - expenses)
+        total_amount = total_income - total_expenses
         total_transactions = len(transactions)
         avg_transaction = total_amount / total_transactions if total_transactions > 0 else 0
         
         return {
             "summary": {
                 "total_amount": total_amount,
+                "total_income": total_income,
+                "total_expenses": total_expenses,
                 "total_transactions": total_transactions,
                 "average_transaction": avg_transaction,
                 "period": f"{start_date} to {end_date}"
@@ -166,7 +181,7 @@ async def get_transaction_reports(
                 {
                     "category": category,
                     "amount": amount,
-                    "percentage": (amount / total_amount * 100) if total_amount > 0 else 0
+                    "percentage": (amount / sum(category_breakdown.values()) * 100) if sum(category_breakdown.values()) > 0 else 0
                 }
                 for category, amount in category_breakdown.items()
             ],
@@ -204,11 +219,13 @@ async def get_account_reports(
         accounts = response.data
         
         # Calculate account statistics
-        total_balance = sum(account['balance'] for account in accounts)
+        total_balance = sum(account['amount'] for account in accounts)
         account_types = defaultdict(list)
         
         for account in accounts:
-            account_types[account['type']].append(account)
+            # Use account_type field (updated field name)
+            account_type = account.get('account_type', 'General')
+            account_types[account_type].append(account)
         
         return {
             "summary": {
@@ -220,7 +237,7 @@ async def get_account_reports(
             "by_type": {
                 account_type: {
                     "count": len(accounts_list),
-                    "total_balance": sum(acc['balance'] for acc in accounts_list),
+                    "total_balance": sum(acc['amount'] for acc in accounts_list),
                     "accounts": accounts_list
                 }
                 for account_type, accounts_list in account_types.items()
@@ -232,6 +249,7 @@ async def get_account_reports(
 
 @app.get("/reports/budget")
 async def get_budget_reports(
+    account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive budget reports"""
@@ -239,13 +257,21 @@ async def get_budget_reports(
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
     
     try:
-        # Fetch budgets from Supabase
-        response = supabase.table('budgets').select('*').eq('user_id', user_id).execute()
+        # Fetch budgets from Supabase with optional account filtering
+        budget_query = supabase.table('budgets').select('*').eq('user_id', user_id).eq('is_active', True)
+        if account_id:
+            budget_query = budget_query.eq('account_id', account_id)
+        
+        response = budget_query.execute()
         budgets = response.data
         
-        # Fetch expenses for budget comparison
+        # Fetch expenses for budget comparison (current month)
         current_month = datetime.now().strftime('%Y-%m')
-        expenses_response = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', f"{current_month}-01").lte('date', f"{current_month}-31").execute()
+        expenses_query = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', f"{current_month}-01").lte('date', f"{current_month}-31")
+        if account_id:
+            expenses_query = expenses_query.eq('account_id', account_id)
+            
+        expenses_response = expenses_query.execute()
         expenses = expenses_response.data
         
         # Calculate budget vs actual
@@ -274,7 +300,9 @@ async def get_budget_reports(
                 "total_budget": total_budget,
                 "total_spent": total_spent,
                 "total_remaining": total_budget - total_spent,
-                "overall_percentage_used": (total_spent / total_budget * 100) if total_budget > 0 else 0
+                "overall_percentage_used": (total_spent / total_budget * 100) if total_budget > 0 else 0,
+                "current_month": current_month,
+                "total_budgets": len(budgets)
             },
             "budget_analysis": budget_analysis,
             "budgets": budgets
@@ -285,6 +313,7 @@ async def get_budget_reports(
 
 @app.get("/reports/subscriptions")
 async def get_subscription_reports(
+    account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive subscription reports"""
@@ -292,8 +321,12 @@ async def get_subscription_reports(
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
     
     try:
-        # Fetch subscriptions from Supabase
-        response = supabase.table('subscriptions').select('*').eq('user_id', user_id).execute()
+        # Fetch subscriptions from Supabase with optional account filtering
+        query = supabase.table('subscriptions').select('*').eq('user_id', user_id).eq('is_active', True)
+        if account_id:
+            query = query.eq('account_id', account_id)
+            
+        response = query.execute()
         subscriptions = response.data
         
         # Calculate subscription statistics
@@ -326,6 +359,7 @@ async def get_subscription_reports(
 
 @app.get("/reports/goals")
 async def get_goal_reports(
+    account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
     """Get comprehensive goal reports"""
@@ -333,8 +367,12 @@ async def get_goal_reports(
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
     
     try:
-        # Fetch goals from Supabase
-        response = supabase.table('goals').select('*').eq('user_id', user_id).execute()
+        # Fetch goals from Supabase with optional account filtering
+        query = supabase.table('goals').select('*').eq('user_id', user_id).eq('is_active', True)
+        if account_id:
+            query = query.eq('account_id', account_id)
+            
+        response = query.execute()
         goals = response.data
         
         # Calculate goal statistics
@@ -385,11 +423,11 @@ async def download_report(
         elif report_type == "accounts":
             data = await get_account_reports(user_id)
         elif report_type == "budget":
-            data = await get_budget_reports(user_id)
+            data = await get_budget_reports(account_id, user_id)
         elif report_type == "subscriptions":
-            data = await get_subscription_reports(user_id)
+            data = await get_subscription_reports(account_id, user_id)
         elif report_type == "goals":
-            data = await get_goal_reports(user_id)
+            data = await get_goal_reports(account_id, user_id)
         else:
             raise HTTPException(status_code=400, detail="Invalid report type")
         
@@ -414,8 +452,8 @@ async def download_report(
                 for account in data['accounts']:
                     writer.writerow([
                         account['name'],
-                        account['type'],
-                        account['balance'],
+                        account.get('account_type', 'General'),
+                        account['amount'],
                         account.get('currency', 'USD')
                     ])
             elif report_type == "budget":
