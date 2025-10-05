@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
-    # """Application startup event"""
+    """Application startup event"""
     logger.info("🚀 Household Expenditure API starting up...")
 
     # Check if Supabase client is available
@@ -70,7 +70,7 @@ async def startup_event():
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
-    # """Middleware to log request processing time"""
+    """Middleware to log request processing time"""
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
@@ -98,12 +98,44 @@ async def health_check():
 # Test endpoint for development
 @app.get("/test")
 async def test_endpoint():
-    # """Test endpoint to verify API functionality"""
+    """Test endpoint to verify API functionality"""
     return {
         "message": "API is working!",
         "timestamp": datetime.now().isoformat(),
         "supabase_configured": bool(config.SUPABASE_URL and config.SUPABASE_KEY)
     }
+
+# Debug endpoint to check data without authentication
+@app.get("/debug/data/{user_id}")
+async def debug_user_data(user_id: str):
+    """Debug endpoint to check user data without authentication"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+
+    try:
+        logger.info(f"🔍 Debug: Checking data for user {user_id}")
+
+        # Check all expenses for this user
+        all_expenses = supabase.table('expenses').select('*').eq('user_id', user_id).execute()
+
+        # Check accounts for this user
+        all_accounts = supabase.table('accounts').select('*').eq('user_id', user_id).execute()
+
+        # Sample some expenses to see structure
+        sample_expenses = all_expenses.data[:3] if all_expenses.data else []
+
+        return {
+            "user_id": user_id,
+            "total_expenses": len(all_expenses.data) if all_expenses.data else 0,
+            "total_accounts": len(all_accounts.data) if all_accounts.data else 0,
+            "sample_expenses": sample_expenses,
+            "sample_accounts": all_accounts.data[:2] if all_accounts.data else [],
+            "expense_dates": [exp.get('date') for exp in all_expenses.data[:5]] if all_expenses.data else [],
+            "account_ids": [acc.get('id') for acc in all_accounts.data] if all_accounts.data else []
+        }
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
 
 
 # Report endpoints
@@ -114,69 +146,95 @@ async def get_transaction_reports(
     account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
-    # """Get comprehensive transaction reports"""
+    """Get comprehensive transaction reports"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Starting transaction report for user {user_id}")
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Parameters - start_date: {start_date}, end_date: {end_date}, account_id: {account_id}")
+        logger.info(f"Fetching transaction reports for user {user_id}, account {account_id}, dates {start_date} to {end_date}")
 
-        # First, let's check what data exists for this user
-        total_check = supabase.table('expenses').select('*', count='exact').eq('user_id', user_id).execute()
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Total transactions in database for user {user_id}: {len(total_check.data)}")
+        # DEBUGGING: Check what data exists for this user first
+        logger.info("=== DEBUGGING DATA RETRIEVAL ===")
 
-        # Check ALL transactions without filters to see what exists
-        all_user_transactions = supabase.table('expenses').select('*').eq('user_id', user_id).limit(10).execute()
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] All transactions for user (no filters): {len(all_user_transactions.data)}")
-        if all_user_transactions.data:
-            for i, trans in enumerate(all_user_transactions.data[:3]):
-                logger.info(f"🔍 [TRANSACTIONS DEBUG] Sample transaction {i+1}: ID={trans.get('id')}, Date={trans.get('date')}, Account={trans.get('account_id')}, Amount={trans.get('amount')}")
+        # Check all expenses for this user (no filters)
+        try:
+            all_user_expenses = supabase.table('expenses').select('*').eq('user_id', user_id).execute()
+            logger.info(f"🔍 ALL expenses for user {user_id}: {len(all_user_expenses.data) if all_user_expenses.data else 0}")
+            if all_user_expenses.data and len(all_user_expenses.data) > 0:
+                sample_expense = all_user_expenses.data[0]
+                logger.info(f"📄 Sample expense structure: {sample_expense}")
+                logger.info(f"📅 Sample expense date: {sample_expense.get('date')}")
+                logger.info(f"💰 Sample expense amount: {sample_expense.get('amount')}")
+                logger.info(f"🏷️ Sample expense category: {sample_expense.get('category')}")
+                logger.info(f"🏦 Sample expense account_id: {sample_expense.get('account_id')}")
+        except Exception as e:
+            logger.error(f"❌ Error checking all user expenses: {e}")
+
+        # Check expenses for specific account if provided
+        if account_id and account_id.strip():
+            try:
+                account_expenses = supabase.table('expenses').select('*').eq('user_id', user_id).eq('account_id', account_id).execute()
+                logger.info(f"🏦 Expenses for account {account_id}: {len(account_expenses.data) if account_expenses.data else 0}")
+                if account_expenses.data and len(account_expenses.data) > 0:
+                    sample_account_expense = account_expenses.data[0]
+                    logger.info(f"📄 Sample account expense: {sample_account_expense}")
+            except Exception as e:
+                logger.error(f"❌ Error checking account expenses: {e}")
 
         # Fetch transactions from Supabase with optional account filtering
-        query = supabase.table('expenses').select('*').eq('user_id', user_id)
+        try:
+            # Build the query step by step with detailed logging
+            logger.info(f"🔧 Building query for user_id: {user_id}")
+            query = supabase.table('expenses').select('*').eq('user_id', user_id)
 
-        # Log the date range
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Applying date filter: {start_date} to {end_date}")
-        query = query.gte('date', start_date).lte('date', end_date)
+            # Log the date range
+            logger.info(f"📅 Adding date range filter: {start_date} to {end_date}")
+            query = query.gte('date', start_date).lte('date', end_date)
 
-        # Add account filter if account_id is provided and not empty
-        if account_id and account_id.strip():
-            logger.info(f"🔍 [TRANSACTIONS DEBUG] Filtering by account_id: {account_id}")
-            query = query.eq('account_id', account_id)
+            # Add account filter if account_id is provided and not empty
+            if account_id and account_id.strip():
+                logger.info(f"🏦 Adding account filter: {account_id}")
+                query = query.eq('account_id', account_id)
 
-            # Debug: Check how many transactions exist for this account
-            account_check = supabase.table('expenses').select('*', count='exact').eq('user_id', user_id).eq('account_id', account_id).execute()
-            logger.info(f"🔍 [TRANSACTIONS DEBUG] Total transactions for account {account_id}: {len(account_check.data)}")
+            # Execute the query and log the raw response
+            logger.info("⚡ Executing final query...")
+            response = query.execute()
+            logger.info(f"📊 Raw query response: {response}")
+            logger.info(f"📊 Response data type: {type(response.data)}")
+            logger.info(f"📊 Response data length: {len(response.data) if response.data else 0}")
 
-            # Check account exists and belongs to user
-            account_verify = supabase.table('accounts').select('*').eq('id', account_id).eq('user_id', user_id).execute()
-            logger.info(f"🔍 [TRANSACTIONS DEBUG] Account verification - found: {len(account_verify.data)} accounts")
-            if account_verify.data:
-                logger.info(f"🔍 [TRANSACTIONS DEBUG] Account details: {account_verify.data[0]}")
-        else:
-            logger.info("🔍 [TRANSACTIONS DEBUG] No account filter applied - showing all accounts")
+            transactions = response.data if response.data else []
+            logger.info(f"✅ Final transactions count: {len(transactions)}")
 
-        logger.info("🔍 [TRANSACTIONS DEBUG] Executing final query...")
-        response = query.execute()
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Final query returned {len(response.data)} transactions")
-
-        transactions = response.data
-
-        # Debug: Log sample transaction if any exist
-        if transactions and len(transactions) > 0:
-            logger.info(f"🔍 [TRANSACTIONS DEBUG] Sample transaction from final query: {transactions[0]}")
-        else:
-            # Check if date format is the issue
-            logger.warning("🔍 [TRANSACTIONS DEBUG] No transactions found. Checking possible date format issues...")
-            # Try without date filter to see if data exists
-            no_date_filter = supabase.table('expenses').select('*').eq('user_id', user_id).limit(5).execute()
-            if no_date_filter.data:
-                logger.info(f"🔍 [TRANSACTIONS DEBUG] Found {len(no_date_filter.data)} transactions without date filter")
-                sample_dates = [t.get('date') for t in no_date_filter.data[:3]]
-                logger.info(f"🔍 [TRANSACTIONS DEBUG] Sample dates in database: {sample_dates}")
+            if len(transactions) > 0:
+                logger.info(f"📄 First transaction: {transactions[0]}")
             else:
-                logger.warning("🔍 [TRANSACTIONS DEBUG] No transactions found at all for this user")
+                logger.warning("⚠️ No transactions found with current filters!")
+
+                # Let's try a simpler query to debug
+                logger.info("🔍 Trying simpler queries to debug...")
+
+                # Try without date filter
+                try:
+                    no_date_query = supabase.table('expenses').select('*').eq('user_id', user_id)
+                    if account_id and account_id.strip():
+                        no_date_query = no_date_query.eq('account_id', account_id)
+                    no_date_response = no_date_query.execute()
+                    logger.info(f"📅 Without date filter: {len(no_date_response.data) if no_date_response.data else 0} transactions")
+                except Exception as e:
+                    logger.error(f"❌ Error with no-date query: {e}")
+
+                # Try without account filter
+                try:
+                    no_account_query = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date)
+                    no_account_response = no_account_query.execute()
+                    logger.info(f"🏦 Without account filter: {len(no_account_response.data) if no_account_response.data else 0} transactions")
+                except Exception as e:
+                    logger.error(f"❌ Error with no-account query: {e}")
+
+        except Exception as e:
+            logger.error(f"❌ Error fetching transactions: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch transactions from database")
 
         # Process data for different chart types
         category_breakdown = defaultdict(float)
@@ -203,7 +261,7 @@ async def get_transaction_reports(
                 date = datetime.fromisoformat(date_str)
 
             except Exception as e:
-                logger.error(f"🔍 [TRANSACTIONS DEBUG] Error processing transaction {transaction.get('id', 'unknown')}: {e}")
+                logger.error(f"Error processing transaction {transaction.get('id', 'unknown')}: {e}")
                 continue
 
             # Use absolute amount for category breakdown and trends
@@ -242,8 +300,6 @@ async def get_transaction_reports(
                 "count": sum(1 for t in transactions if t['category'] == category)
             }
 
-        logger.info(f"🔍 [TRANSACTIONS DEBUG] Final summary - Income: {total_income}, Expenses: {total_expenses}, Net: {total_amount}, Transactions: {total_transactions}")
-
         return {
             "summary": {
                 "total_amount": total_amount,
@@ -271,7 +327,7 @@ async def get_transaction_reports(
             "transactions": transactions
         }
     except Exception as e:
-        logger.error(f"❌ [TRANSACTIONS DEBUG] Error fetching transaction reports: {e}")
+        logger.error(f"Error fetching transaction reports: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch transaction reports")
 
 
@@ -280,24 +336,15 @@ async def get_account_reports(
     account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
-    # """Get account balance and transaction summary reports"""
+    """Get account balance and transaction summary reports"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [ACCOUNTS DEBUG] Starting account reports for user {user_id}, account_id: {account_id}")
-
-        # Debug: Check ALL accounts for this user first
-        all_accounts_check = supabase.table('accounts').select('*', count='exact').eq('user_id', user_id).execute()
-        logger.info(f"🔍 [ACCOUNTS DEBUG] Total accounts in database for user {user_id}: {len(all_accounts_check.data)}")
-
-        if all_accounts_check.data:
-            for account in all_accounts_check.data:
-                logger.info(f"🔍 [ACCOUNTS DEBUG] Account: ID={account.get('id')}, Name={account.get('name')}, Balance={account.get('balance')}")
+        logger.info(f"Fetching account reports for user {user_id}, account {account_id}")
 
         # Fetch accounts
         if account_id and account_id.strip():
-            logger.info(f"🔍 [ACCOUNTS DEBUG] Filtering by specific account ID: {account_id}")
             accounts_query = supabase.table('accounts').select('*').eq('user_id', user_id).eq('id', account_id)
         else:
             accounts_query = supabase.table('accounts').select('*').eq('user_id', user_id)
@@ -305,10 +352,7 @@ async def get_account_reports(
         accounts_response = accounts_query.execute()
         accounts = accounts_response.data
 
-        logger.info(f"🔍 [ACCOUNTS DEBUG] Final accounts query returned {len(accounts)} accounts")
-
         if not accounts:
-            logger.warning(f"🔍 [ACCOUNTS DEBUG] No accounts found for user {user_id}")
             return {
                 "summary": {
                     "total_balance": 0,
@@ -344,10 +388,6 @@ async def get_account_reports(
                 "created_at": account.get('created_at', '')
             })
 
-            logger.info(f"🔍 [ACCOUNTS DEBUG] Account {account['name']}: balance={account_balance}, transactions={transaction_count}")
-
-        logger.info(f"🔍 [ACCOUNTS DEBUG] Final summary - Total balance: {total_balance}, Total accounts: {len(accounts)}, Total transactions: {total_transactions}")
-
         return {
             "summary": {
                 "total_balance": total_balance,
@@ -358,7 +398,7 @@ async def get_account_reports(
         }
 
     except Exception as e:
-        logger.error(f"❌ [ACCOUNTS DEBUG] Error fetching account reports: {e}")
+        logger.error(f"Error fetching account reports: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch account reports")
 
 
@@ -369,13 +409,12 @@ async def get_budget_reports(
     account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
-    # """Get budget vs actual spending analysis"""
+    """Get budget vs actual spending analysis"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [BUDGETS DEBUG] Starting budget reports for user {user_id}")
-        logger.info(f"🔍 [BUDGETS DEBUG] Parameters - start_date: {start_date}, end_date: {end_date}, account_id: {account_id}")
+        logger.info(f"Fetching budget reports for user {user_id}")
 
         # If no dates provided, use current month
         if not start_date or not end_date:
@@ -383,29 +422,20 @@ async def get_budget_reports(
             start_date = today.replace(day=1).strftime('%Y-%m-%d')
             last_day = monthrange(today.year, today.month)[1]
             end_date = today.replace(day=last_day).strftime('%Y-%m-%d')
-            logger.info(f"🔍 [BUDGETS DEBUG] Using default date range: {start_date} to {end_date}")
 
         # Fetch budgets
         budgets_query = supabase.table('budgets').select('*').eq('user_id', user_id)
         budgets_response = budgets_query.execute()
         budgets = budgets_response.data or []
 
-        logger.info(f"🔍 [BUDGETS DEBUG] Found {len(budgets)} budgets for user {user_id}")
-        if budgets:
-            for budget in budgets:
-                logger.info(f"🔍 [BUDGETS DEBUG] Budget: Category={budget.get('category')}, Amount={budget.get('amount')}")
-
         # Fetch expenses for the period
         expenses_query = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date)
 
         if account_id and account_id.strip():
-            logger.info(f"🔍 [BUDGETS DEBUG] Filtering expenses by account_id: {account_id}")
             expenses_query = expenses_query.eq('account_id', account_id)
 
         expenses_response = expenses_query.execute()
         expenses = expenses_response.data or []
-
-        logger.info(f"🔍 [BUDGETS DEBUG] Found {len(expenses)} expenses in date range")
 
         # Calculate spending by category
         category_spending = defaultdict(float)
@@ -413,8 +443,6 @@ async def get_budget_reports(
             if expense.get('entry_type', 'Expense') == 'Expense':
                 category = expense.get('category', 'Uncategorized')
                 category_spending[category] += abs(expense.get('amount', 0))
-
-        logger.info(f"🔍 [BUDGETS DEBUG] Category spending: {dict(category_spending)}")
 
         # Compare budgets with actual spending
         budget_comparison = []
@@ -440,12 +468,6 @@ async def get_budget_reports(
                 "status": "over" if spent > budget_amount else "under" if spent < budget_amount * 0.9 else "near"
             })
 
-            logger.info(f"🔍 [BUDGETS DEBUG] Budget comparison for {category}: budget={budget_amount}, spent={spent}, remaining={remaining}")
-
-        # Find unbudgeted spending
-        unbudgeted_categories = {category: amount for category, amount in category_spending.items() if not any(b.get('category') == category for b in budgets)}
-        logger.info(f"🔍 [BUDGETS DEBUG] Unbudgeted spending: {unbudgeted_categories}")
-
         return {
             "summary": {
                 "period": f"{start_date} to {end_date}",
@@ -455,11 +477,15 @@ async def get_budget_reports(
                 "overall_percentage": (total_spent / total_budget * 100) if total_budget > 0 else 0
             },
             "budget_comparison": budget_comparison,
-            "unbudgeted_spending": unbudgeted_categories
+            "unbudgeted_spending": {
+                category: amount
+                for category, amount in category_spending.items()
+                if not any(b.get('category') == category for b in budgets)
+            }
         }
 
     except Exception as e:
-        logger.error(f"❌ [BUDGETS DEBUG] Error fetching budget reports: {e}")
+        logger.error(f"Error fetching budget reports: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch budget reports")
 
 
@@ -467,22 +493,17 @@ async def get_budget_reports(
 async def get_goal_reports(
     user_id: str = Depends(verify_token)
 ):
-    # """Get financial goals progress tracking"""
+    """Get financial goals progress tracking"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [GOALS DEBUG] Starting goal reports for user {user_id}")
+        logger.info(f"Fetching goal reports for user {user_id}")
 
         # Fetch goals
         goals_query = supabase.table('goals').select('*').eq('user_id', user_id)
         goals_response = goals_query.execute()
         goals = goals_response.data or []
-
-        logger.info(f"🔍 [GOALS DEBUG] Found {len(goals)} goals for user {user_id}")
-        if goals:
-            for goal in goals:
-                logger.info(f"🔍 [GOALS DEBUG] Goal: Name={goal.get('name')}, Target={goal.get('target_amount')}, Current={goal.get('current_amount')}")
 
         goal_details = []
         total_target = 0
@@ -519,8 +540,6 @@ async def get_goal_reports(
                 "status": "completed" if percentage >= 100 else "on_track" if percentage >= 50 else "needs_attention"
             })
 
-        logger.info(f"🔍 [GOALS DEBUG] Final summary - Total target: {total_target}, Total saved: {total_saved}, Goals: {len(goals)}")
-
         return {
             "summary": {
                 "total_goals": len(goals),
@@ -534,7 +553,7 @@ async def get_goal_reports(
         }
 
     except Exception as e:
-        logger.error(f"❌ [GOALS DEBUG] Error fetching goal reports: {e}")
+        logger.error(f"Error fetching goal reports: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch goal reports")
 
 
@@ -543,27 +562,21 @@ async def get_subscription_reports(
     account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
-    # """Get subscription cost breakdown and analysis"""
+    """Get subscription cost breakdown and analysis"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [SUBSCRIPTIONS DEBUG] Starting subscription reports for user {user_id}, account_id: {account_id}")
+        logger.info(f"Fetching subscription reports for user {user_id}")
 
         # Fetch subscriptions
         subs_query = supabase.table('subscriptions').select('*').eq('user_id', user_id)
 
         if account_id and account_id.strip():
-            logger.info(f"🔍 [SUBSCRIPTIONS DEBUG] Filtering by account_id: {account_id}")
             subs_query = subs_query.eq('account_id', account_id)
 
         subs_response = subs_query.execute()
         subscriptions = subs_response.data or []
-
-        logger.info(f"🔍 [SUBSCRIPTIONS DEBUG] Found {len(subscriptions)} subscriptions for user {user_id}")
-        if subscriptions:
-            for sub in subscriptions:
-                logger.info(f"🔍 [SUBSCRIPTIONS DEBUG] Subscription: Name={sub.get('name')}, Cost={sub.get('cost')}, Cycle={sub.get('billing_cycle')}")
 
         # Calculate costs
         subscription_details = []
@@ -605,8 +618,6 @@ async def get_subscription_reports(
         for sub in subscription_details:
             category_breakdown[sub['category']] += sub['monthly_equivalent']
 
-        logger.info(f"🔍 [SUBSCRIPTIONS DEBUG] Final summary - Monthly total: {monthly_total}, Yearly total: {yearly_total}, Active: {len([s for s in subscriptions if s.get('status') == 'active'])}")
-
         return {
             "summary": {
                 "total_subscriptions": len(subscriptions),
@@ -619,7 +630,7 @@ async def get_subscription_reports(
         }
 
     except Exception as e:
-        logger.error(f"❌ [SUBSCRIPTIONS DEBUG] Error fetching subscription reports: {e}")
+        logger.error(f"Error fetching subscription reports: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch subscription reports")
 
 
@@ -632,14 +643,11 @@ async def download_report(
     account_id: Optional[str] = None,
     user_id: str = Depends(verify_token)
 ):
-    # """Download reports in CSV or PDF format"""
+    """Download reports in CSV or PDF format"""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
 
     try:
-        logger.info(f"🔍 [DOWNLOAD DEBUG] Starting download for report_type: {report_type}, format: {format}")
-        logger.info(f"🔍 [DOWNLOAD DEBUG] Parameters - start_date: {start_date}, end_date: {end_date}, account_id: {account_id}")
-
         # Get report data based on type
         if report_type == "transactions":
             if not start_date or not end_date:
@@ -667,8 +675,6 @@ async def download_report(
             csv_content = output.getvalue()
             output.close()
 
-            logger.info(f"🔍 [DOWNLOAD DEBUG] Generated CSV with {len(data['transactions'])} transactions")
-
             # Return CSV file
             return {
                 "content": csv_content,
@@ -688,169 +694,5 @@ async def download_report(
             raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
 
     except Exception as e:
-        logger.error(f"❌ [DOWNLOAD DEBUG] Error generating report download: {e}")
+        logger.error(f"Error generating report download: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate report download")
-
-
-# Add comprehensive diagnostic endpoints
-@app.get("/debug/all-user-data")
-async def debug_all_user_data(user_id: str = Depends(verify_token)):
-    # """Comprehensive diagnostic endpoint to check ALL user data"""
-    if supabase is None:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized")
-
-    try:
-        diagnostic_data = {}
-        tables = [
-            'expenses', 'accounts', 'budgets', 'goals',
-            'subscriptions', 'loans', 'categories', 'users'
-        ]
-
-        for table in tables:
-            try:
-                # First check if table exists and get total count
-                count_query = supabase.table(table).select('id', count='exact').eq('user_id', user_id)
-                count_response = count_query.execute()
-
-                # Get sample data
-                sample_query = supabase.table(table).select('*').eq('user_id', user_id).limit(3)
-                sample_response = sample_query.execute()
-
-                diagnostic_data[table] = {
-                    "total_count": len(count_response.data) if count_response.data else 0,
-                    "sample_data": sample_response.data if sample_response.data else [],
-                    "raw_count_response": count_response.count if hasattr(count_response, 'count') else 'unknown'
-                }
-
-                logger.info(f"🔍 [DIAGNOSTIC DEBUG] Table '{table}': {diagnostic_data[table]['total_count']} records for user {user_id}")
-
-            except Exception as e:
-                diagnostic_data[table] = {
-                    "error": str(e),
-                    "total_count": 0,
-                    "sample_data": []
-                }
-                logger.error(f"❌ [DIAGNOSTIC DEBUG] Error querying {table}: {e}")
-
-        return {
-            "user_id": user_id,
-            "timestamp": datetime.now().isoformat(),
-            "diagnostic": diagnostic_data,
-            "summary": {
-                "tables_with_data": [table for table, data in diagnostic_data.items() if data.get('total_count', 0) > 0],
-                "total_tables_checked": len(tables)
-            }
-        }
-    except Exception as e:
-        logger.error(f"❌ [DIAGNOSTIC DEBUG] Error in comprehensive diagnostic: {e}")
-        raise HTTPException(status_code=500, detail="Comprehensive diagnostic failed")
-
-
-@app.get("/debug/check-data-issues")
-async def debug_data_issues(user_id: str = Depends(verify_token)):
-    # """Check for common data issues"""
-    if supabase is None:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized")
-
-    issues = []
-
-    # Check 1: Are there any transactions at all in the database?
-    try:
-        all_transactions = supabase.table('expenses').select('*').limit(5).execute()
-        if all_transactions.data:
-            issues.append(f"Found {len(all_transactions.data)} total transactions in DB, but none for current user")
-            issues.append(f"Sample transaction user_ids: {[t.get('user_id') for t in all_transactions.data]}")
-        else:
-            issues.append("No transactions found in entire database")
-    except Exception as e:
-        issues.append(f"Error checking all transactions: {e}")
-
-    # Check 2: Check table structure
-    try:
-        sample_structure = supabase.table('expenses').select('*').limit(1).execute()
-        if sample_structure.data:
-            issues.append(f"Expenses table structure: {list(sample_structure.data[0].keys())}")
-        else:
-            issues.append("Cannot determine expenses table structure - table might be empty")
-    except Exception as e:
-        issues.append(f"Error checking table structure: {e}")
-
-    # Check 3: Verify user exists in auth system
-    try:
-        user_check = supabase.table('users').select('*').eq('id', user_id).execute()
-        if user_check.data:
-            issues.append(f"User found in users table: {user_check.data[0]}")
-        else:
-            issues.append("User not found in users table (might be using auth.users only)")
-    except Exception as e:
-        issues.append(f"Error checking users table: {e}")
-
-    return {
-        "user_id": user_id,
-        "issues": issues,
-        "timestamp": datetime.now().isoformat()
-    }
-
-
-@app.post("/debug/create-sample-data")
-async def create_sample_data(user_id: str = Depends(verify_token)):
-    # """Create sample data for testing"""
-    if supabase is None:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized")
-
-    try:
-        # Create a sample account
-        account_data = {
-            "user_id": user_id,
-            "name": "Sample Bank Account",
-            "type": "checking",
-            "balance": 1500.00,
-            "currency": "USD"
-        }
-        account_response = supabase.table('accounts').insert(account_data).execute()
-        account_id = account_response.data[0]['id'] if account_response.data else None
-
-        # Create sample transactions
-        sample_transactions = [
-            {
-                "user_id": user_id,
-                "account_id": account_id,
-                "amount": -100.00,
-                "description": "Grocery Shopping",
-                "category": "Food",
-                "date": "2024-01-15",
-                "entry_type": "Expense"
-            },
-            {
-                "user_id": user_id,
-                "account_id": account_id,
-                "amount": 2000.00,
-                "description": "Salary",
-                "category": "Income",
-                "date": "2024-01-01",
-                "entry_type": "Income"
-            },
-            {
-                "user_id": user_id,
-                "account_id": account_id,
-                "amount": -50.00,
-                "description": "Netflix Subscription",
-                "category": "Entertainment",
-                "date": "2024-01-05",
-                "entry_type": "Expense"
-            }
-        ]
-
-        transactions_response = supabase.table('expenses').insert(sample_transactions).execute()
-
-        return {
-            "message": "Sample data created successfully",
-            "account_created": account_id is not None,
-            "transactions_created": len(transactions_response.data) if transactions_response.data else 0,
-            "sample_account_id": account_id,
-            "user_id": user_id
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Error creating sample data: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create sample data: {e}")

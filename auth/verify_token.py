@@ -8,7 +8,7 @@ security = HTTPBearer()
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         token = credentials.credentials
-        
+
         # Verify the token with Supabase
         try:
             # Get user from token
@@ -40,7 +40,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid token: Could not decode"
                 )
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
