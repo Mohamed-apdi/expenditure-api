@@ -105,6 +105,70 @@ async def test_endpoint():
         "supabase_configured": bool(config.SUPABASE_URL and config.SUPABASE_KEY)
     }
 
+# Diagnostic endpoint
+@app.get("/debug/check-data")
+async def check_data(user_id: str = Depends(verify_token)):
+    """Diagnostic endpoint to check what data exists in the database"""
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+
+    try:
+        logger.info(f"Running diagnostic check for user {user_id}")
+
+        # Check expenses
+        expenses_response = supabase.table('expenses').select('*').eq('user_id', user_id).limit(10).execute()
+        expenses = expenses_response.data or []
+
+        # Check accounts
+        accounts_response = supabase.table('accounts').select('*').eq('user_id', user_id).execute()
+        accounts = accounts_response.data or []
+
+        # Check budgets
+        budgets_response = supabase.table('budgets').select('*').eq('user_id', user_id).execute()
+        budgets = budgets_response.data or []
+
+        # Check goals
+        goals_response = supabase.table('goals').select('*').eq('user_id', user_id).execute()
+        goals = goals_response.data or []
+
+        # Check subscriptions
+        subs_response = supabase.table('subscriptions').select('*').eq('user_id', user_id).execute()
+        subscriptions = subs_response.data or []
+
+        # Get date range of transactions
+        date_info = {}
+        if expenses:
+            dates = [e.get('date') for e in expenses if e.get('date')]
+            date_info = {
+                "sample_dates": dates[:5],
+                "date_format_examples": [type(d).__name__ for d in dates[:3]]
+            }
+
+        return {
+            "user_id": user_id,
+            "timestamp": datetime.now().isoformat(),
+            "data_summary": {
+                "total_expenses": len(expenses),
+                "total_accounts": len(accounts),
+                "total_budgets": len(budgets),
+                "total_goals": len(goals),
+                "total_subscriptions": len(subscriptions)
+            },
+            "sample_expense": expenses[0] if expenses else None,
+            "sample_account": accounts[0] if accounts else None,
+            "date_info": date_info,
+            "account_ids_in_use": list(set([e.get('account_id') for e in expenses if e.get('account_id')])),
+            "categories_in_use": list(set([e.get('category') for e in expenses if e.get('category')]))
+        }
+
+    except Exception as e:
+        logger.error(f"Error in diagnostic check: {e}")
+        return {
+            "error": str(e),
+            "user_id": user_id,
+            "message": "Diagnostic check failed"
+        }
+
 # Report endpoints
 @app.get("/reports/transactions")
 async def get_transaction_reports(
@@ -120,20 +184,45 @@ async def get_transaction_reports(
     try:
         logger.info(f"Fetching transaction reports for user {user_id}, account {account_id}, dates {start_date} to {end_date}")
 
+        # First, let's check what data exists for this user
+        total_check = supabase.table('expenses').select('*', count='exact').eq('user_id', user_id).execute()
+        logger.info(f"Total transactions in database for user {user_id}: {len(total_check.data)}")
+
         # Fetch transactions from Supabase with optional account filtering
-        query = supabase.table('expenses').select('*').eq('user_id', user_id).gte('date', start_date).lte('date', end_date)
+        query = supabase.table('expenses').select('*').eq('user_id', user_id)
+
+        # Log the date range
+        logger.info(f"Date range filter: {start_date} to {end_date}")
+        query = query.gte('date', start_date).lte('date', end_date)
 
         # Add account filter if account_id is provided and not empty
         if account_id and account_id.strip():
             logger.info(f"Filtering by account_id: {account_id}")
             query = query.eq('account_id', account_id)
+
+            # Debug: Check how many transactions exist for this account
+            account_check = supabase.table('expenses').select('*', count='exact').eq('user_id', user_id).eq('account_id', account_id).execute()
+            logger.info(f"Total transactions for account {account_id}: {len(account_check.data)}")
         else:
             logger.info("No account filter applied - showing all accounts")
 
         response = query.execute()
 
         transactions = response.data
-        logger.info(f"Found {len(transactions)} transactions")
+        logger.info(f"Found {len(transactions)} transactions after filtering")
+
+        # Debug: Log sample transaction if any exist
+        if transactions and len(transactions) > 0:
+            logger.info(f"Sample transaction: {transactions[0]}")
+        else:
+            # Check if date format is the issue
+            logger.warning("No transactions found. Checking possible date format issues...")
+            # Try without date filter to see if data exists
+            no_date_filter = supabase.table('expenses').select('*').eq('user_id', user_id).limit(5).execute()
+            if no_date_filter.data:
+                logger.info(f"Sample transaction dates in DB: {[t.get('date') for t in no_date_filter.data[:3]]}")
+            else:
+                logger.warning("No transactions found at all for this user")
 
         # Process data for different chart types
         category_breakdown = defaultdict(float)
